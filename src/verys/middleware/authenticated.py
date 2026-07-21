@@ -70,11 +70,11 @@ class BearerToken(AuthenticationBackend):
 
         auth = conn.headers.get("Authorization")
         if not auth:
-            raise AuthenticationError("Not authenticated")
+            raise AuthenticationError("Authorization header required.")
 
         parts = auth.split()
         if len(parts) != 2 or parts[0].lower() != "bearer":
-            raise AuthenticationError("Not authenticated")
+            raise AuthenticationError("Bad authorization header.")
 
         token = parts[1]
         try:
