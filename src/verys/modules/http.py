@@ -47,7 +47,7 @@ def json_error(
     )
 
 
-async def read_model(request: Request, model: type[BaseModel]):
+async def check_body(request: Request, model: type[BaseModel]):
     """Parse and validate a JSON request body against a Pydantic model.
 
     Returns ``(instance, None)`` on success or ``(None, JSONResponse)`` with a

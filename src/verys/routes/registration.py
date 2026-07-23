@@ -12,7 +12,7 @@ from verys.models.identity import Identity
 from verys.models.oauth2_session import OAuth2Session
 from verys.models.oauth2_client import OAuthClient
 from verys.config import config
-from verys.modules.http import json_error, json_message, read_model
+from verys.modules.http import json_error, json_message, check_body
 from verys.routes.verification import send_verification_email
 
 logger = logging.getLogger("verys.registration")
@@ -50,7 +50,7 @@ async def show_registration(request: Request):
 
 
 async def register(request: Request):
-    body, err = await read_model(request, RegistrationBody)
+    body, err = await check_body(request, RegistrationBody)
     if err:
         return err
 

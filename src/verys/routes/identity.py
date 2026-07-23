@@ -10,7 +10,7 @@ from starlette.routing import Route
 
 from verys.config import config
 from verys.models.identity import Identity
-from verys.modules.http import json_error, json_message, read_model, require_query
+from verys.modules.http import json_error, json_message, check_body, require_query
 
 logger = logging.getLogger("verys.identity")
 
@@ -102,7 +102,7 @@ class IdentityUpdate(BaseModel):
 async def update_identity(request: Request):
     if not request.user.is_admin:
         return _forbidden(request, f"update identity {request.path_params['email']}")
-    update, err = await read_model(request, IdentityUpdate)
+    update, err = await check_body(request, IdentityUpdate)
     if err:
         return err
 

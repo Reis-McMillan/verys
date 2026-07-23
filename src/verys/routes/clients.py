@@ -11,7 +11,7 @@ from verys.config import config
 from verys.models.oauth2_client import OAuthClient
 from verys.models.scope import Scope
 from verys.modules.client_auth import hash_client_secret
-from verys.modules.http import json_error, json_message, read_model
+from verys.modules.http import json_error, json_message, check_body
 
 logger = logging.getLogger("verys.clients")
 
@@ -61,8 +61,8 @@ async def _get_prm_uri(prm_uri: str, client_name: str, session: Session):
 
 async def create_client(request: Request):
     if not request.user.is_admin:
-        return json_error("Admin access required", status_code=403)
-    body, err = await read_model(request, ClientCreateRequest)
+        return json_error("Unauthorized to perform this action", status_code=403)
+    body, err = await check_body(request, ClientCreateRequest)
     if err:
         return err
 
@@ -113,7 +113,7 @@ async def create_client(request: Request):
 
 async def list_clients(request: Request):
     if not request.user.is_admin:
-        return json_error("Admin access required", status_code=403)
+        return json_error("Unauthorized to perform this action", status_code=403)
 
     session = request.state.session
     clients = OAuthClient.all(session)
@@ -136,7 +136,7 @@ async def list_clients(request: Request):
 
 async def get_client(request: Request):
     if not request.user.is_admin:
-        return json_error("Admin access required", status_code=403)
+        return json_error("Unauthorized to perform this action", status_code=403)
 
     session = request.state.session
     client_id = request.path_params["client_id"]
@@ -161,8 +161,8 @@ async def get_client(request: Request):
 
 async def update_client(request: Request):
     if not request.user.is_admin:
-        return json_error("Admin access required", status_code=403)
-    body, err = await read_model(request, ClientUpdateRequest)
+        return json_error("Unauthorized to perform this action", status_code=403)
+    body, err = await check_body(request, ClientUpdateRequest)
     if err:
         return err
 
@@ -205,7 +205,7 @@ async def update_client(request: Request):
 
 async def delete_client(request: Request):
     if not request.user.is_admin:
-        return json_error("Admin access required", status_code=403)
+        return json_error("Unauthorized to perform this action", status_code=403)
 
     session = request.state.session
     client_id = request.path_params["client_id"]

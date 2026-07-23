@@ -8,7 +8,7 @@ from starlette.routing import Route
 from verys.models.role import Role
 from verys.models.identity import Identity
 from verys.models.identity_role import IdentityRole
-from verys.modules.http import json_error, json_message, read_model
+from verys.modules.http import json_error, json_message, check_body
 
 logger = logging.getLogger("verys.roles")
 
@@ -34,7 +34,7 @@ async def list_roles(request: Request):
 async def create_role(request: Request):
     if err := _require_admin(request, "create a role"):
         return err
-    body, err = await read_model(request, RoleCreateBody)
+    body, err = await check_body(request, RoleCreateBody)
     if err:
         return err
 

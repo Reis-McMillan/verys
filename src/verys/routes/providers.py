@@ -9,7 +9,7 @@ from verys.models.external_provider import ExternalProvider
 from verys.models.external_token import ExternalToken
 from verys.models.scope import Scope
 from verys.modules.encryption import encrypt_field
-from verys.modules.http import json_error, json_message, read_model
+from verys.modules.http import json_error, json_message, check_body
 
 logger = logging.getLogger("verys.providers")
 
@@ -53,7 +53,7 @@ def _serialize(provider: ExternalProvider) -> dict:
 async def create_provider(request: Request):
     if not request.user.is_admin:
         return json_error("Admin access required", status_code=403)
-    body, err = await read_model(request, ProviderCreateRequest)
+    body, err = await check_body(request, ProviderCreateRequest)
     if err:
         return err
 
@@ -116,7 +116,7 @@ async def get_provider(request: Request):
 async def update_provider(request: Request):
     if not request.user.is_admin:
         return json_error("Admin access required", status_code=403)
-    body, err = await read_model(request, ProviderUpdateRequest)
+    body, err = await check_body(request, ProviderUpdateRequest)
     if err:
         return err
 

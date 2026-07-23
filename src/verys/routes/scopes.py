@@ -5,7 +5,7 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from verys.models.scope import Scope
-from verys.modules.http import json_error, json_message, read_model
+from verys.modules.http import json_error, json_message, check_body
 
 logger = logging.getLogger("verys.scopes")
 
@@ -33,7 +33,7 @@ def _serialize(scope: Scope) -> dict:
 async def create_scope(request: Request):
     if not request.user.is_admin:
         return json_error("Admin access required", status_code=403)
-    body, err = await read_model(request, ScopeCreateRequest)
+    body, err = await check_body(request, ScopeCreateRequest)
     if err:
         return err
 
@@ -79,7 +79,7 @@ async def get_scope(request: Request):
 async def update_scope(request: Request):
     if not request.user.is_admin:
         return json_error("Admin access required", status_code=403)
-    body, err = await read_model(request, ScopeUpdateRequest)
+    body, err = await check_body(request, ScopeUpdateRequest)
     if err:
         return err
 
