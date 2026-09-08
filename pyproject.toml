@@ -27,6 +27,7 @@ dependencies = [
     "sentry-sdk>=2.53",
     "httpx>=0.28",
     "humanize>=4.15",
+    "pymongo>=4.17.0",
 ]
 
 [tool.hatch.build.targets.wheel]
