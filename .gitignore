@@ -3,3 +3,4 @@ __pycache__
 .pytest_cache
 src/verys/config/config.py
 .vscode
+.claude
