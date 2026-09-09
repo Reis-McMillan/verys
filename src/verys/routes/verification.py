@@ -8,8 +8,6 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import humanize
-from pydantic import ValidationError
-from sqlmodel import Session
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from starlette.routing import Route
@@ -19,6 +17,7 @@ from verys.models.verification import Verification
 from verys.models.identity import Identity
 from verys.models.oauth2_session import OAuth2Session
 from verys.modules.cookie import encrypt_cookie
+from verys.modules.email import normalize_email
 from verys.modules.http import json_error, json_message, require_query
 
 logger = logging.getLogger("verys.verification")
@@ -39,90 +38,96 @@ def _cookie_opts() -> dict:
     return opts
 
 
+async def _consume_code(email: str, code: int, ttl: int) -> dict | None:
+    """Consume the pending verification entry. Returns it on success, or
+    ``None`` if it is missing, wrong, or older than ``ttl`` seconds."""
+    entry = await Verification.get(email=email, code=code)
+    if entry is None:
+        return None
+    await Verification.delete(email=email)
+    if entry["when"] < datetime.now(timezone.utc) - timedelta(seconds=ttl):
+        return None
+    return entry
+
+
 async def verify_code(request: Request):
     if err := require_query(request, "email", "code"):
         return err
-    session = request.state.session
-    email = request.query_params.get("email")
+    email = normalize_email(request.query_params.get("email"))
     code = request.query_params.get("code")
     oauth2_session = request.query_params.get("oauth2_session")
 
     try:
-        v_entry = Verification.verify(session, email, int(code), config.VERIFY_TTL)
-        if not v_entry:
-            logger.warning("Verification failed: invalid or expired code for %s", email)
-            return json_error("Invalid or expired code", status_code=404)
-    except ValidationError as e:
-        logger.warning("Verification failed: validation error for %s - %s", email, e)
-        return json_error(str(e), status_code=404)
+        code_int = int(code)
     except ValueError as e:
         logger.warning("Verification failed: value error for %s - %s", email, e)
         return json_error(str(e), status_code=404)
 
-    r = Identity.get(session, email)
+    if not await _consume_code(email, code_int, config.VERIFY_TTL):
+        logger.warning("Verification failed: invalid or expired code for %s", email)
+        return json_error("Invalid or expired code", status_code=404)
+
+    r = await Identity.get(email=email, closed=False)
     if not r:
         logger.warning("Verification failed: no identity for %s", email)
         return json_error("No account exists for this email", status_code=404)
 
+    now = datetime.now(timezone.utc)
     # If the identity has expired, refresh the session key & expiry. Verification
     # renews browser sessions; email_verified, once set, stays set.
-    if r.expires < datetime.now(timezone.utc):
-        new_key = Identity.make_auth_key()
-        expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=config.AUTHENTICATION_TTL)
-        r = Identity.update(session, email, new_key=new_key, new_expires=expiry_dt)
+    if r["expires"] < now:
+        r["auth_key"] = Identity.make_auth_key()
+        r["expires"] = now + timedelta(seconds=config.AUTHENTICATION_TTL)
 
-    r.last_auth_time = datetime.now(timezone.utc)
-    r.email_verified = True
-    session.add(r)
-    session.commit()
-    session.refresh(r)
+    r["last_auth_time"] = now
+    r["email_verified"] = True
+    r = await Identity.upsert(r)
 
     logger.info("Verification successful: %s", email)
-    value, iv = encrypt_cookie(r.email, r.auth_key)
+    value, iv = encrypt_cookie(r["email"], r["auth_key"])
     cookie_opts = _cookie_opts()
 
     # If this verification was part of an OAuth2 flow, redirect back to /authorize
     if oauth2_session:
-        oauth2_sess = OAuth2Session.get_by_session_id(session, oauth2_session)
-        if oauth2_sess and not oauth2_sess.is_expired():
+        oauth2_sess = await OAuth2Session.get(session_id=oauth2_session)
+        if oauth2_sess and not OAuth2Session.is_expired(oauth2_sess):
             params = {
-                "response_type": oauth2_sess.response_type,
-                "client_id": oauth2_sess.client_id,
-                "redirect_uri": oauth2_sess.redirect_uri,
-                "scope": oauth2_sess.scope,
+                "response_type": oauth2_sess["response_type"],
+                "client_id": oauth2_sess["client_id"],
+                "redirect_uri": oauth2_sess["redirect_uri"],
+                "scope": oauth2_sess["scope"],
             }
-            if oauth2_sess.state:
-                params["state"] = oauth2_sess.state
-            if oauth2_sess.nonce:
-                params["nonce"] = oauth2_sess.nonce
-            if oauth2_sess.code_challenge:
-                params["code_challenge"] = oauth2_sess.code_challenge
-            if oauth2_sess.code_challenge_method:
-                params["code_challenge_method"] = oauth2_sess.code_challenge_method
+            for key in ("state", "nonce", "code_challenge", "code_challenge_method"):
+                if oauth2_sess.get(key):
+                    params[key] = oauth2_sess[key]
 
-            session.delete(oauth2_sess)
-            session.commit()
+            await OAuth2Session.delete(session_id=oauth2_session)
 
             response = RedirectResponse(url=f"/authorize?{urlencode(params)}", status_code=302)
             response.set_cookie(key=config.ENCRYPT_COOKIE_NAME, value=value, **cookie_opts)
             response.set_cookie(key=f"{config.ENCRYPT_COOKIE_NAME}_iv", value=iv, **cookie_opts)
-            logger.info("OAuth2 flow: redirecting %s back to /authorize", r.email)
+            logger.info("OAuth2 flow: redirecting %s back to /authorize", r["email"])
             return response
 
     response = json_message("Email verified.")
     response.set_cookie(key=config.ENCRYPT_COOKIE_NAME, value=value, **cookie_opts)
     response.set_cookie(key=f"{config.ENCRYPT_COOKIE_NAME}_iv", value=iv, **cookie_opts)
-    logger.info("Cookie issued for %s", r.email)
+    logger.info("Cookie issued for %s", r["email"])
     return response
 
 
-async def send_verification_email(session: Session, email: str):
+async def send_verification_email(email: str):
     """Generate a verification code for the given email and send it.
 
     Returns a ``JSONResponse`` (500) if the email send fails, otherwise ``None``.
     """
+    email = normalize_email(email)
     vcode = Verification.make_code()
-    Verification.make_entry(session, email, vcode)
+
+    entry = await Verification.get(email=email) or {"email": email}
+    entry["code"] = vcode
+    entry["when"] = datetime.now(timezone.utc)
+    await Verification.upsert(entry)
 
     ttl_delta = timedelta(seconds=config.VERIFY_TTL)
     identity_ttl_str = humanize.precisedelta(ttl_delta, minimum_unit="minutes")
@@ -165,7 +170,10 @@ async def send_verification_email(session: Session, email: str):
             start_tls=True,
             recipients=recipients,
         )
-        Verification.email_sent_at(session, email, datetime.now(timezone.utc))
+        entry = await Verification.get(email=email)
+        if entry:
+            entry["email_sent"] = datetime.now(timezone.utc)
+            await Verification.upsert(entry)
         logger.info("Verification email sent to %s", email)
     except Exception as e:
         logger.error("Email send failed for %s: %s", email, e, exc_info=True)
@@ -176,11 +184,10 @@ async def send_verification_email(session: Session, email: str):
 async def handle_verification(request: Request):
     if err := require_query(request, "email"):
         return err
-    session = request.state.session
-    email = request.query_params.get("email")
+    email = normalize_email(request.query_params.get("email"))
     oauth2_session = request.query_params.get("oauth2_session")
 
-    identity = Identity.get(session, email)
+    identity = await Identity.get(email=email, closed=False)
     if not identity:
         params = {"email": email}
         if oauth2_session:
@@ -188,7 +195,7 @@ async def handle_verification(request: Request):
         logger.info("POST /verification: no identity for %s — redirecting to /register/", email)
         return RedirectResponse(url=f"/register/?{urlencode(params)}", status_code=302)
 
-    if err := await send_verification_email(session, identity.email):
+    if err := await send_verification_email(identity["email"]):
         return err
     return json_message("Verification code sent.", status_code=201)
 

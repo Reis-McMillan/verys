@@ -3,7 +3,6 @@ import secrets
 
 import httpx
 from pydantic import BaseModel
-from sqlmodel import Session
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -36,7 +35,14 @@ class ClientUpdateRequest(BaseModel):
     is_public: bool | None = None
 
 
-async def _get_prm_uri(prm_uri: str, client_name: str, session: Session):
+async def _unknown_scope(scopes: list[str]) -> str | None:
+    for s in scopes:
+        if not await Scope.get(name=s):
+            return s
+    return None
+
+
+async def _get_prm_uri(prm_uri: str, client_name: str):
     """Returns ``(required_scopes, None)`` or ``(None, JSONResponse error)``."""
     async with httpx.AsyncClient() as client:
         response = await client.get(prm_uri)
@@ -53,9 +59,8 @@ async def _get_prm_uri(prm_uri: str, client_name: str, session: Session):
             return None, json_error("Client name must match OAuth resource name.")
 
         required_scopes = result.get("scopes_supported", [])
-        for s in required_scopes:
-            if not Scope.get_by_name(session, s):
-                return None, json_error(f"Unknown scope '{s}'")
+        if unknown := await _unknown_scope(required_scopes):
+            return None, json_error(f"Unknown scope '{unknown}'")
         return required_scopes, None
 
 
@@ -66,45 +71,40 @@ async def create_client(request: Request):
     if err:
         return err
 
-    session = request.state.session
-    for s in body.allowed_scopes:
-        if not Scope.get_by_name(session, s):
-            return json_error(f"Unknown scope '{s}'")
+    if unknown := await _unknown_scope(body.allowed_scopes):
+        return json_error(f"Unknown scope '{unknown}'")
 
     required_scopes = []
     if body.prm_uri:
-        required_scopes, prm_err = await _get_prm_uri(body.prm_uri, body.client_name, session)
+        required_scopes, prm_err = await _get_prm_uri(body.prm_uri, body.client_name)
         if prm_err:
             return prm_err
 
     plain_secret = secrets.token_urlsafe(48) if not body.is_public else None
 
-    client = OAuthClient(
-        client_name=body.client_name,
-        redirect_uris=body.redirect_uris,
-        allowed_scopes=body.allowed_scopes,
-        prm_uri=body.prm_uri,
-        required_scopes=required_scopes,
-        grant_types=body.grant_types,
-        token_endpoint_auth_method=body.token_endpoint_auth_method,
-        is_public=body.is_public,
-        client_secret_hash=hash_client_secret(plain_secret) if plain_secret else None,
-        owner_email=request.user.email,
-    )
-    session.add(client)
-    session.commit()
-    session.refresh(client)
+    client = await OAuthClient.upsert({
+        "client_name": body.client_name,
+        "redirect_uris": body.redirect_uris,
+        "allowed_scopes": body.allowed_scopes,
+        "prm_uri": body.prm_uri,
+        "required_scopes": required_scopes,
+        "grant_types": body.grant_types,
+        "token_endpoint_auth_method": body.token_endpoint_auth_method,
+        "is_public": body.is_public,
+        "client_secret_hash": hash_client_secret(plain_secret) if plain_secret else None,
+        "owner_email": request.user.email,
+    })
 
-    logger.info("Client created: %s (%s)", client.client_id, client.client_name)
+    logger.info("Client created: %s (%s)", client["client_id"], client["client_name"])
 
     payload = {
-        "client_id": client.client_id,
-        "client_name": client.client_name,
-        "redirect_uris": client.redirect_uris,
-        "allowed_scopes": client.allowed_scopes,
-        "grant_types": client.grant_types,
-        "token_endpoint_auth_method": client.token_endpoint_auth_method,
-        "is_public": client.is_public,
+        "client_id": client["client_id"],
+        "client_name": client["client_name"],
+        "redirect_uris": client["redirect_uris"],
+        "allowed_scopes": client["allowed_scopes"],
+        "grant_types": client["grant_types"],
+        "token_endpoint_auth_method": client["token_endpoint_auth_method"],
+        "is_public": client["is_public"],
     }
     if plain_secret:
         payload["client_secret"] = plain_secret
@@ -115,19 +115,18 @@ async def list_clients(request: Request):
     if not request.user.is_admin:
         return json_error("Unauthorized to perform this action", status_code=403)
 
-    session = request.state.session
-    clients = OAuthClient.all(session)
+    clients = await OAuthClient.all()
     return json_message(
         "Clients retrieved.",
         clients=[
             {
-                "client_id": c.client_id,
-                "client_name": c.client_name,
-                "redirect_uris": c.redirect_uris,
-                "allowed_scopes": c.allowed_scopes,
-                "required_scopes": c.required_scopes,
-                "is_public": c.is_public,
-                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "client_id": c["client_id"],
+                "client_name": c["client_name"],
+                "redirect_uris": c["redirect_uris"],
+                "allowed_scopes": c["allowed_scopes"],
+                "required_scopes": c["required_scopes"],
+                "is_public": c["is_public"],
+                "created_at": c["created_at"].isoformat() if c.get("created_at") else None,
             }
             for c in clients
         ],
@@ -138,24 +137,22 @@ async def get_client(request: Request):
     if not request.user.is_admin:
         return json_error("Unauthorized to perform this action", status_code=403)
 
-    session = request.state.session
-    client_id = request.path_params["client_id"]
-    client = OAuthClient.get_by_client_id(session, client_id)
+    client = await OAuthClient.get(client_id=request.path_params["client_id"])
     if not client:
         return json_error("Client not found", status_code=404)
 
     return json_message(
         "Client retrieved.",
-        client_id=client.client_id,
-        client_name=client.client_name,
-        redirect_uris=client.redirect_uris,
-        allowed_scopes=client.allowed_scopes,
-        required_scopes=client.required_scopes,
-        grant_types=client.grant_types,
-        token_endpoint_auth_method=client.token_endpoint_auth_method,
-        is_public=client.is_public,
-        created_at=client.created_at.isoformat() if client.created_at else None,
-        owner_email=client.owner_email,
+        client_id=client["client_id"],
+        client_name=client["client_name"],
+        redirect_uris=client["redirect_uris"],
+        allowed_scopes=client["allowed_scopes"],
+        required_scopes=client["required_scopes"],
+        grant_types=client["grant_types"],
+        token_endpoint_auth_method=client["token_endpoint_auth_method"],
+        is_public=client["is_public"],
+        created_at=client["created_at"].isoformat() if client.get("created_at") else None,
+        owner_email=client["owner_email"],
     )
 
 
@@ -166,40 +163,34 @@ async def update_client(request: Request):
     if err:
         return err
 
-    session = request.state.session
-    client_id = request.path_params["client_id"]
-    client = OAuthClient.get_by_client_id(session, client_id)
+    client = await OAuthClient.get(client_id=request.path_params["client_id"])
     if not client:
         return json_error("Client not found", status_code=404)
 
     if body.client_name is not None:
-        client.client_name = body.client_name
+        client["client_name"] = body.client_name
     if body.redirect_uris is not None:
-        client.redirect_uris = body.redirect_uris
+        client["redirect_uris"] = body.redirect_uris
     if body.allowed_scopes is not None:
-        for s in body.allowed_scopes:
-            if not Scope.get_by_name(session, s):
-                return json_error(f"Unknown scope '{s}'")
-        client.allowed_scopes = body.allowed_scopes
+        if unknown := await _unknown_scope(body.allowed_scopes):
+            return json_error(f"Unknown scope '{unknown}'")
+        client["allowed_scopes"] = body.allowed_scopes
     if body.prm_uri is not None:
-        client_name = body.client_name if body.client_name else client.client_name
-        required_scopes, prm_err = await _get_prm_uri(body.prm_uri, client_name, session)
+        required_scopes, prm_err = await _get_prm_uri(body.prm_uri, client["client_name"])
         if prm_err:
             return prm_err
-        client.prm_uri = body.prm_uri
-        client.required_scopes = required_scopes
+        client["prm_uri"] = body.prm_uri
+        client["required_scopes"] = required_scopes
     if body.grant_types is not None:
-        client.grant_types = body.grant_types
+        client["grant_types"] = body.grant_types
     if body.token_endpoint_auth_method is not None:
-        client.token_endpoint_auth_method = body.token_endpoint_auth_method
+        client["token_endpoint_auth_method"] = body.token_endpoint_auth_method
     if body.is_public is not None:
-        client.is_public = body.is_public
+        client["is_public"] = body.is_public
 
-    session.add(client)
-    session.commit()
-    session.refresh(client)
+    await OAuthClient.upsert(client)
 
-    logger.info("Client updated: %s", client.client_id)
+    logger.info("Client updated: %s", client["client_id"])
     return json_message("Client updated.")
 
 
@@ -207,14 +198,9 @@ async def delete_client(request: Request):
     if not request.user.is_admin:
         return json_error("Unauthorized to perform this action", status_code=403)
 
-    session = request.state.session
     client_id = request.path_params["client_id"]
-    client = OAuthClient.get_by_client_id(session, client_id)
-    if not client:
+    if not await OAuthClient.delete(client_id=client_id):
         return json_error("Client not found", status_code=404)
-
-    session.delete(client)
-    session.commit()
 
     logger.info("Client deleted: %s", client_id)
     return json_message("Client deleted.")

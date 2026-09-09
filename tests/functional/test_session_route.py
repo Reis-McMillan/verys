@@ -1,15 +1,22 @@
-import base64
 from datetime import datetime, timedelta, timezone
 
 from verys.models.identity import Identity
-from verys.models.oauth2_client import OAuthClient
 from verys.models.refresh_token import RefreshToken
-from verys.modules.client_auth import hash_client_secret
 from verys.modules.cookie import encrypt_cookie
 from verys.modules.jwt import create_id_token
+from tests.helpers import new_client
 
 
-def test_end_session_clears_cookies(session, client):
+async def _refresh_token(identity: dict, client_id: str) -> dict:
+    return await RefreshToken.upsert({
+        'client_id': client_id,
+        'identity_id': identity['id'],
+        'scopes': ['openid'],
+        'expires_at': datetime.now(timezone.utc) + timedelta(days=30),
+    })
+
+
+def test_end_session_clears_cookies(client):
     # Set cookies first
     token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
     client.cookies.set('token', token)
@@ -28,33 +35,20 @@ def test_end_session_clears_cookies(session, client):
     client.cookies.clear()
 
 
-def test_end_session_with_id_token_hint(session, client):
-    admin = Identity.get(session, "admin@mcmlln.dev")
-    oa = OAuthClient(
-        client_name="Session Test App",
-        redirect_uris=["https://session.example.com/callback"],
-        allowed_scopes=["openid"],
-        client_secret_hash=hash_client_secret("session-secret"),
+async def test_end_session_with_id_token_hint(db, client):
+    admin = await Identity.get(email="admin@mcmlln.dev")
+    oa = await new_client(
+        "Session Test App", ["https://session.example.com/callback"],
+        secret="session-secret", allowed_scopes=["openid"],
     )
-    session.add(oa)
-    session.commit()
-    session.refresh(oa)
 
     # Create a refresh token for this user+client
-    rt = RefreshToken(
-        client_id=oa.client_id,
-        identity_id=admin.id,
-        scopes=["openid"],
-        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-    )
-    session.add(rt)
-    session.commit()
-    session.refresh(rt)
+    rt = await _refresh_token(admin, oa['client_id'])
 
     # Create id_token_hint
     id_token = create_id_token(
         identity=admin,
-        client_id=oa.client_id,
+        client_id=oa['client_id'],
         client_scopes=["openid"],
         nonce=None,
         auth_time=datetime.now(timezone.utc),
@@ -68,26 +62,20 @@ def test_end_session_with_id_token_hint(session, client):
     assert res.status_code == 200
 
     # Verify the refresh token was revoked
-    session.expire_all()
-    found = RefreshToken.get_by_token(session, rt.token)
-    assert found.revoked == True
+    found = await RefreshToken.get(token=rt['token'])
+    assert found['revoked'] is True
 
 
-def test_end_session_with_redirect(session, client):
-    admin = Identity.get(session, "admin@mcmlln.dev")
-    oa = OAuthClient(
-        client_name="Redirect Session App",
-        redirect_uris=["https://session-redirect.example.com/callback"],
-        allowed_scopes=["openid"],
-        client_secret_hash=hash_client_secret("redirect-session-secret"),
+async def test_end_session_with_redirect(db, client):
+    admin = await Identity.get(email="admin@mcmlln.dev")
+    oa = await new_client(
+        "Redirect Session App", ["https://session-redirect.example.com/callback"],
+        secret="redirect-session-secret", allowed_scopes=["openid"],
     )
-    session.add(oa)
-    session.commit()
-    session.refresh(oa)
 
     id_token = create_id_token(
         identity=admin,
-        client_id=oa.client_id,
+        client_id=oa['client_id'],
         client_scopes=["openid"],
         nonce=None,
         auth_time=datetime.now(timezone.utc),
@@ -107,21 +95,16 @@ def test_end_session_with_redirect(session, client):
     assert 'logout-state' in res.headers['location']
 
 
-def test_end_session_redirect_invalid_uri(session, client):
-    admin = Identity.get(session, "admin@mcmlln.dev")
-    oa = OAuthClient(
-        client_name="Invalid Redirect Session App",
-        redirect_uris=["https://valid.example.com/callback"],
-        allowed_scopes=["openid"],
-        client_secret_hash=hash_client_secret("inv-redirect-secret"),
+async def test_end_session_redirect_invalid_uri(db, client):
+    admin = await Identity.get(email="admin@mcmlln.dev")
+    oa = await new_client(
+        "Invalid Redirect Session App", ["https://valid.example.com/callback"],
+        secret="inv-redirect-secret", allowed_scopes=["openid"],
     )
-    session.add(oa)
-    session.commit()
-    session.refresh(oa)
 
     id_token = create_id_token(
         identity=admin,
-        client_id=oa.client_id,
+        client_id=oa['client_id'],
         client_scopes=["openid"],
         nonce=None,
         auth_time=datetime.now(timezone.utc),
@@ -147,27 +130,18 @@ def test_end_session_no_params(client):
     assert 'Logged Out' in res.text
 
 
-def test_token_revoke(session, client):
-    admin = Identity.get(session, "admin@mcmlln.dev")
-    rt = RefreshToken(
-        client_id="revoke-route-client",
-        identity_id=admin.id,
-        scopes=["openid"],
-        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-    )
-    session.add(rt)
-    session.commit()
-    session.refresh(rt)
+async def test_token_revoke(db, client):
+    admin = await Identity.get(email="admin@mcmlln.dev")
+    rt = await _refresh_token(admin, "revoke-route-client")
 
     res = client.post(
         '/token/revoke',
-        data={'token': rt.token},
+        data={'token': rt['token']},
     )
     assert res.status_code == 200
 
-    session.expire_all()
-    found = RefreshToken.get_by_token(session, rt.token)
-    assert found.revoked == True
+    found = await RefreshToken.get(token=rt['token'])
+    assert found['revoked'] is True
 
 
 def test_token_revoke_nonexistent(client):

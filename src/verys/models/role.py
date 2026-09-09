@@ -1,66 +1,56 @@
-from typing import List, TYPE_CHECKING
-from sqlmodel import Field, SQLModel, Session, select, Relationship
+import uuid
 
-from verys.models.identity_role import IdentityRole
+from pydantic import BaseModel, ConfigDict, Field, UUID4
 
-if TYPE_CHECKING:
-    from verys.models.identity import Identity
+from verys.models.base import Base, LIVE, LOG_STAGE
+
+DEFAULT_ROLES = ["admin", "service-account"]
 
 
-class Role(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str = Field(unique=True)
-    identities: List["Identity"] = Relationship(
-        back_populates="roles", link_model=IdentityRole
-    )
+class RoleSchema(BaseModel):
+    """Canonical role document. The same shape is embedded in
+    ``identity.roles``."""
 
-    @classmethod
-    def new(
-        cls,
-        session: Session,
-        name: str
-    ):
-        new_role = cls.model_validate({
-            "name": name
-        })
-        session.add(new_role)
-        session.commit()
-        session.refresh(new_role)
-        return new_role
-    
-    @classmethod
-    def get(
-        cls,
-        session: Session,
-        name: str
-    ):
-        statement = select(cls).where(cls.name == name)
-        return session.exec(statement).first()
+    model_config = ConfigDict(extra="forbid")
 
-    @classmethod
-    def delete(cls, session, name):
-        role = cls.get(session, name)
-        if not role:
-            return None
-        session.delete(role)
-        session.commit()
-        return role
+    id: UUID4 = Field(default_factory=uuid.uuid4)
+    name: str
 
-    
-    @classmethod
-    def all(
-        cls,
-        session: Session
-    ):
-        statement = select(cls)
-        return list(session.exec(statement).all())
-    
-    @classmethod
-    def seed_roles(cls, session: Session):
-        """Ensure standard roles exist in the database."""
-        defaults = ["admin", "service-account"]
-        for name in defaults:
-            existing = cls.get(session, name)
-            if not existing:
-                session.add(cls(name=name))
-        session.commit()
+
+class Role(Base):
+    name = "role"
+    identity_fields = ["id"]
+    schema = RoleSchema
+
+    # Re-derive every identity's embedded roles from this collection so that
+    # renames propagate and deleted/missing roles drop out. Only identities
+    # whose embedded copies differ are rewritten (with a log entry).
+    pipeline_collection = "identity"
+    pipeline = [
+        {"$match": LIVE},
+        {
+            "$lookup": {
+                "from": "role",
+                "localField": "roles.id",
+                "foreignField": "id",
+                "pipeline": [
+                    {"$match": LIVE},
+                    {"$project": {"_id": 0, "id": 1, "name": 1}},
+                    {"$sort": {"name": 1}},
+                ],
+                "as": "synced",
+            }
+        },
+        {"$match": {"$expr": {"$ne": ["$roles", "$synced"]}}},
+        {"$set": {"roles": "$synced"}},
+        {"$unset": "synced"},
+        LOG_STAGE,
+        {
+            "$merge": {
+                "into": "identity",
+                "on": "_id",
+                "whenMatched": "replace",
+                "whenNotMatched": "discard",
+            }
+        },
+    ]

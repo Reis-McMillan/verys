@@ -1,86 +1,77 @@
 from datetime import datetime, timedelta, timezone
-from starlette.testclient import TestClient
+
 import pytest
-from sqlmodel import SQLModel
+from starlette.testclient import TestClient
 
 from verys.app import app
-from verys.database import initialize_db, get_session, engine
-from verys.models import Identity, Role, IdentityRole
+from verys.config import config
+from verys.database import close_db, ensure_indexes, get_client
+from verys.models import Identity, Role
 from verys.modules.cookie import encrypt_cookie
 from verys.modules.jwt import create_signed_jwt
 
+ADMIN_EMAIL = 'admin@mcmlln.dev'
+ADMIN_KEY = 'paris_people'
+SERVICE_EMAIL = 'service@mcmlln.dev'
+SERVICE_KEY = 'jd vance erika kirk baby'
 
-@pytest.fixture(scope="module")
-def admin_jwt(session):
-    admin = Identity.get(session, 'admin@mcmlln.dev')
+
+@pytest.fixture(scope='module')
+async def db():
+    """Fresh database per test module, seeded with an admin and a service
+    account. Runs on pytest's module event loop; the app under TestClient
+    uses its own loop and therefore its own Mongo client."""
+    await get_client().drop_database(config.MONGO_DB_NAME)
+    await ensure_indexes()
+
+    admin_role = await Role.upsert({'name': 'admin'})
+    service_role = await Role.upsert({'name': 'service-account'})
+    expires = datetime.now(timezone.utc) + timedelta(days=30)
+
+    await Identity.upsert({
+        'first_name': 'Admin',
+        'last_name': 'User',
+        'email': ADMIN_EMAIL,
+        'auth_key': ADMIN_KEY,
+        'expires': expires,
+        'email_verified': True,
+        'roles': [admin_role],
+    })
+    await Identity.upsert({
+        'first_name': 'Service',
+        'last_name': 'Account',
+        'email': SERVICE_EMAIL,
+        'auth_key': SERVICE_KEY,
+        'expires': expires,
+        'email_verified': True,
+        'roles': [service_role],
+    })
+
+    yield
+
+    await get_client().drop_database(config.MONGO_DB_NAME)
+    await close_db()
+
+
+@pytest.fixture(scope='module')
+async def admin_jwt(db):
+    admin = await Identity.get(email=ADMIN_EMAIL)
     return create_signed_jwt(admin, ['openid'])
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def admin_creds():
-    token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
+    token, iv = encrypt_cookie(ADMIN_EMAIL, ADMIN_KEY)
     return token, iv
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def service_user_creds():
-    token, iv = encrypt_cookie('service@mcmlln.dev', 'jd vance erika kirk baby')
+    token, iv = encrypt_cookie(SERVICE_EMAIL, SERVICE_KEY)
     return token, iv
 
 
 @pytest.fixture(scope='module')
-def session():
-    # Drop existing tables to ensure clean state
-    SQLModel.metadata.drop_all(engine)
-    # Recreate tables
-    initialize_db()
-
-    session = next(get_session())
-
-    admin_user = Identity.new(
-        session,
-        'Admin',
-        'User',
-        'admin@mcmlln.dev',
-        'paris_people',
-        datetime.now(timezone.utc) + timedelta(days=30),
-    )
-    admin_user.email_verified = True
-    session.add(admin_user)
-    service_user = Identity.new(
-        session,
-        'Service',
-        'Account',
-        'service@mcmlln.dev',
-        'jd vance erika kirk baby',
-        datetime.now(timezone.utc) + timedelta(days=30),
-    )
-    service_user.email_verified = True
-    session.add(service_user)
-    session.commit()
-
-    admin_role = Role.new(session, 'admin')
-    service_account_role = Role.new(session, 'service-account')
-    
-    IdentityRole.add_identity_role(
-        session,
-        admin_user.id,
-        admin_role.id
-    )
-    session.refresh(admin_user)
-    IdentityRole.add_identity_role(
-        session,
-        service_user.id,
-        service_account_role.id
-    )
-    session.refresh(service_user)
-
-    yield session
-
-    session.close()
-    SQLModel.metadata.drop_all(engine)
-
-@pytest.fixture(scope='module')
-def client(session):
+def client(db):
     with TestClient(app) as client:
         yield client

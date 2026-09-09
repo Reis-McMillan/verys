@@ -1,56 +1,32 @@
 import uuid
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime
 
-from sqlalchemy import Column, ARRAY, String, DateTime
-from sqlmodel import Field, SQLModel, Session, select
+from pydantic import BaseModel, ConfigDict, Field
+
+from verys.models.base import Base, utcnow
 
 
-class OAuthClient(SQLModel, table=True):
-    __tablename__ = "oauth_client"
+class OAuthClientSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    id: int | None = Field(default=None, primary_key=True)
-    client_id: str = Field(
-        default_factory=lambda: str(uuid.uuid4()),
-        unique=True,
-        index=True,
+    client_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    client_secret_hash: str | None = None
+    client_name: str
+    redirect_uris: list[str] = Field(default_factory=list)
+    allowed_scopes: list[str] = Field(default_factory=lambda: ["openid"])
+    prm_uri: str | None = None
+    required_scopes: list[str] = Field(default_factory=list)
+    grant_types: list[str] = Field(
+        default_factory=lambda: ["authorization_code", "refresh_token"]
     )
-    client_secret_hash: Optional[str] = Field(default=None)
-    client_name: str = Field()
-    redirect_uris: List[str] = Field(
-        default_factory=list,
-        sa_column=Column(ARRAY(String)),
-    )
-    allowed_scopes: List[str] = Field(
-        default_factory=lambda: ["openid"],
-        sa_column=Column(ARRAY(String)),
-    )
-    prm_uri: Optional[str] = Field(default=None)
-    required_scopes: Optional[List[str]] = Field(
-        default_factory=lambda: [],
-        sa_column=Column(ARRAY(String))
-    )
-    grant_types: List[str] = Field(
-        default_factory=lambda: ["authorization_code", "refresh_token"],
-        sa_column=Column(ARRAY(String)),
-    )
-    response_types: List[str] = Field(
-        default_factory=lambda: ["code"],
-        sa_column=Column(ARRAY(String)),
-    )
-    token_endpoint_auth_method: str = Field(default="client_secret_basic")
-    is_public: bool = Field(default=False)
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        sa_column=Column(DateTime(timezone=True)),
-    )
-    owner_email: Optional[str] = Field(default=None)
+    response_types: list[str] = Field(default_factory=lambda: ["code"])
+    token_endpoint_auth_method: str = "client_secret_basic"
+    is_public: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+    owner_email: str | None = None
 
-    @classmethod
-    def get_by_client_id(cls, session: Session, client_id: str):
-        statement = select(cls).where(cls.client_id == client_id)
-        return session.exec(statement).first()
 
-    @classmethod
-    def all(cls, session: Session):
-        return session.exec(select(cls)).all()
+class OAuthClient(Base):
+    name = "oauth_client"
+    identity_fields = ["client_id"]
+    schema = OAuthClientSchema

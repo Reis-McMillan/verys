@@ -1,19 +1,8 @@
 import base64
 import os
-from urllib.parse import quote_plus
 
-def generate_safe_pg_url(user, password, host, port, db_name):
-    """Generates a URL-safe Postgres connection string."""
-    safe_password = quote_plus(password)
-    return f"postgresql://{user}:{safe_password}@{host}:{port}/{db_name}"
-
-DB_HOST = os.environ.get("DB_HOST")
-DB_USER = os.environ.get("DB_USER")
-DB_NAME = os.environ.get("DB_NAME")
-DB_PASSWORD = os.environ.get("DB_PASSWORD")
-DATABASE_URL = os.environ.get("DATABASE_URL") or generate_safe_pg_url(
-    DB_USER, DB_PASSWORD, DB_HOST, 5432, DB_NAME
-)
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "verys")
 VERIFY_FROM_ADDR = 'support@mcmlln.dev'
 USERNAME_SMTP = os.environ.get('USERNAME_SMTP')
 PASSWORD_SMTP = os.environ.get('PASSWORD_SMTP')

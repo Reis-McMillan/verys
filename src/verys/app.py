@@ -1,7 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
 
-from sqlmodel import Session
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
@@ -10,10 +9,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from verys.config import config
-from verys.database import engine, initialize_db, get_session
+from verys.database import close_db, ensure_indexes
 from verys.middleware.authenticated import BearerToken, on_auth_error
 from verys.middleware.logging import RequestLoggingMiddleware
-from verys.models import Scope, Role, OAuthClient
+from verys.models import OAuthClient, Role, Scope
+from verys.models.role import DEFAULT_ROLES
+from verys.models.scope import OIDC_SCOPES
 from verys.modules.logging import setup_logging, shutdown_logging
 from verys.routes import (
     clients,
@@ -31,58 +32,55 @@ from verys.routes import (
     verification,
 )
 
+logger = logging.getLogger("verys")
+
+
+async def seed_defaults() -> None:
+    """Ensure the standard roles, OIDC scopes, and the Verys public client exist."""
+    for name in DEFAULT_ROLES:
+        if not await Role.get(name=name):
+            await Role.upsert({"name": name})
+
+    for name, description in OIDC_SCOPES:
+        if not await Scope.get(name=name):
+            await Scope.upsert({"name": name, "description": description})
+
+    verys_client = await OAuthClient.get(client_id=config.VERYS_CLIENT_ID)
+    if not verys_client:
+        await OAuthClient.upsert({
+            "client_id": config.VERYS_CLIENT_ID,
+            "client_name": "Verys Client",
+            "redirect_uris": [config.VERYS_CLIENT_REDIRECT_URI],
+            "allowed_scopes": ["openid", "email", "profile", "google", "microsoft"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "is_public": True,
+        })
+        logger.info("Seeded Verys public client: %s", config.VERYS_CLIENT_ID)
+    elif verys_client["redirect_uris"] != [config.VERYS_CLIENT_REDIRECT_URI]:
+        verys_client["redirect_uris"] = [config.VERYS_CLIENT_REDIRECT_URI]
+        await OAuthClient.upsert(verys_client)
+        logger.info("Updated Verys public client redirect_uris: %s", config.VERYS_CLIENT_ID)
+
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
     setup_logging()
-    initialize_db()
-    for db_session in get_session():
-        Role.seed_roles(db_session)
-        Scope.seed_oidc_scopes(db_session)
-        verys_client = OAuthClient.get_by_client_id(db_session, config.VERYS_CLIENT_ID)
-        if not verys_client:
-            verys_client = OAuthClient(
-                client_id=config.VERYS_CLIENT_ID,
-                client_name="Verys Client",
-                redirect_uris=[config.VERYS_CLIENT_REDIRECT_URI],
-                allowed_scopes=["openid", "email", "profile", "google", "microsoft"],
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-                token_endpoint_auth_method="none",
-                is_public=True,
-            )
-            db_session.add(verys_client)
-            db_session.commit()
-            logging.getLogger("verys").info("Seeded Verys public client: %s", config.VERYS_CLIENT_ID)
-        elif verys_client.redirect_uris != [config.VERYS_CLIENT_REDIRECT_URI]:
-            verys_client.redirect_uris = [config.VERYS_CLIENT_REDIRECT_URI]
-            db_session.commit()
-            logging.getLogger("verys").info("Updated Verys public client redirect_uris: %s", config.VERYS_CLIENT_ID)
-    logging.getLogger("verys").info("Verys service starting")
+    await ensure_indexes()
+    await seed_defaults()
+    # Repair any drift between the `role` collection and the copies embedded
+    # in identity documents.
+    await Role.run_pipeline()
+    logger.info("Verys service starting")
     yield
-    logging.getLogger("verys").info("Verys service shutting down")
+    logger.info("Verys service shutting down")
     shutdown_logging()
-
-
-class DBSessionMiddleware:
-    """Open one DB session per HTTP request, exposed as ``request.state.session``."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        with Session(engine) as db_session:
-            scope.setdefault("state", {})["session"] = db_session
-            await self.app(scope, receive, send)
+    await close_db()
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logging.getLogger("verys").exception(
-        "Unhandled exception on %s %s", request.method, request.url.path
-    )
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 
@@ -111,7 +109,6 @@ middleware = [
         allow_headers=["Authorization", "Content-Type"],
     ),
     Middleware(RequestLoggingMiddleware),
-    Middleware(DBSessionMiddleware),
     Middleware(AuthenticationMiddleware, backend=BearerToken(), on_error=on_auth_error),
 ]
 

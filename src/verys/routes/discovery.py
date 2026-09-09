@@ -7,8 +7,7 @@ from verys.models.scope import Scope
 
 
 async def openid_configuration(request: Request):
-    session = request.state.session
-    scopes_supported = Scope.get_names(session)
+    scopes_supported = sorted(s["name"] for s in await Scope.all())
     return JSONResponse({
         "issuer": config.ISSUER,
         "authorization_endpoint": f"{config.ISSUER}/authorize",

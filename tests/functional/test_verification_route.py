@@ -3,22 +3,23 @@ from unittest.mock import patch, AsyncMock
 
 from verys.config import config
 from verys.models import Verification, Identity
+from tests.helpers import new_identity
 
 
-def _register(session, email: str):
+async def _register(email: str):
     """Pre-create an Identity the way /register would have."""
-    return Identity.new(
-        session,
-        'Test',
-        'User',
-        email,
-        Identity.make_auth_key(),
-        datetime.now(timezone.utc) + timedelta(days=30),
-    )
+    return await new_identity(email)
 
 
-def test_request_verification(client, session):
-    _register(session, 'newuser@example.com')
+async def _make_entry(email: str, code: int, when: datetime | None = None) -> dict:
+    entry = {'email': email, 'code': code}
+    if when:
+        entry['when'] = when
+    return await Verification.upsert(entry)
+
+
+async def test_request_verification(db, client):
+    await _register('newuser@example.com')
     with patch('verys.routes.verification.aiosmtplib.send', new_callable=AsyncMock):
         res = client.post(
             '/verification',
@@ -27,28 +28,24 @@ def test_request_verification(client, session):
     assert res.status_code == 201
 
 
-def test_request_verification_creates_entry(client, session):
-    _register(session, 'entrycheck@example.com')
+async def test_request_verification_creates_entry(db, client):
+    await _register('entrycheck@example.com')
     with patch('verys.routes.verification.aiosmtplib.send', new_callable=AsyncMock):
         client.post(
             '/verification',
             params={'email': 'entrycheck@example.com'}
         )
 
-    session.expire_all()
-    from sqlmodel import select
-    entry = session.exec(
-        select(Verification).where(Verification.email == 'entrycheck@example.com')
-    ).first()
+    entry = await Verification.get(email='entrycheck@example.com')
     assert entry is not None
-    assert entry.email == 'entrycheck@example.com'
-    assert entry.email_sent is not None
+    assert entry['email'] == 'entrycheck@example.com'
+    assert entry['email_sent'] is not None
 
 
-def test_verify_valid_code(client, session):
-    _register(session, 'verifytest@example.com')
+async def test_verify_valid_code(db, client):
+    await _register('verifytest@example.com')
     code = Verification.make_code()
-    Verification.make_entry(session, 'verifytest@example.com', code)
+    await _make_entry('verifytest@example.com', code)
 
     res = client.get(
         '/verification',
@@ -58,25 +55,27 @@ def test_verify_valid_code(client, session):
     assert config.ENCRYPT_COOKIE_NAME in res.cookies
     assert f"{config.ENCRYPT_COOKIE_NAME}_iv" in res.cookies
 
+    # Code is single-use
+    assert await Verification.get(email='verifytest@example.com') is None
 
-def test_verify_marks_email_verified(client, session):
-    session.expire_all()
-    identity = Identity.get(session, 'verifytest@example.com')
+
+async def test_verify_marks_email_verified(db, client):
+    identity = await Identity.get(email='verifytest@example.com')
     assert identity is not None
-    assert identity.email == 'verifytest@example.com'
-    assert identity.email_verified is True
+    assert identity['email'] == 'verifytest@example.com'
+    assert identity['email_verified'] is True
+    assert identity['last_auth_time'] is not None
 
 
-def test_verify_refreshes_expired_identity(client, session):
+async def test_verify_refreshes_expired_identity(db, client):
     # Pre-create an identity whose session key has expired
-    identity = _register(session, 'existinguser@example.com')
-    old_key = identity.auth_key
-    identity.expires = datetime.now(timezone.utc) - timedelta(days=1)
-    session.add(identity)
-    session.commit()
+    identity = await _register('existinguser@example.com')
+    old_key = identity['auth_key']
+    identity['expires'] = datetime.now(timezone.utc) - timedelta(days=1)
+    await Identity.upsert(identity)
 
     code = Verification.make_code()
-    Verification.make_entry(session, 'existinguser@example.com', code)
+    await _make_entry('existinguser@example.com', code)
 
     res = client.get(
         '/verification',
@@ -85,16 +84,16 @@ def test_verify_refreshes_expired_identity(client, session):
     assert res.status_code == 200
     assert config.ENCRYPT_COOKIE_NAME in res.cookies
 
-    session.expire_all()
-    identity = Identity.get(session, 'existinguser@example.com')
-    assert identity.auth_key != old_key
-    assert identity.email_verified is True
+    identity = await Identity.get(email='existinguser@example.com')
+    assert identity['auth_key'] != old_key
+    assert identity['expires'] > datetime.now(timezone.utc)
+    assert identity['email_verified'] is True
 
 
-def test_verify_invalid_code(client, session):
-    _register(session, 'invalidcode@example.com')
+async def test_verify_invalid_code(db, client):
+    await _register('invalidcode@example.com')
     code = Verification.make_code()
-    Verification.make_entry(session, 'invalidcode@example.com', code)
+    await _make_entry('invalidcode@example.com', code)
 
     res = client.get(
         '/verification',
@@ -104,13 +103,13 @@ def test_verify_invalid_code(client, session):
     assert res.json()['error'] == 'Invalid or expired code'
 
 
-def test_verify_expired_code(client, session):
-    _register(session, 'expiredcode@example.com')
+async def test_verify_expired_code(db, client):
+    await _register('expiredcode@example.com')
     code = Verification.make_code()
-    entry = Verification.make_entry(session, 'expiredcode@example.com', code)
-    entry.when = datetime.now(timezone.utc) - timedelta(hours=1)
-    session.add(entry)
-    session.commit()
+    await _make_entry(
+        'expiredcode@example.com', code,
+        when=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
 
     res = client.get(
         '/verification',
@@ -136,8 +135,8 @@ def test_verify_non_numeric_code(client):
     assert res.status_code == 404
 
 
-def test_email_send_failure(client, session):
-    _register(session, 'fail@example.com')
+async def test_email_send_failure(db, client):
+    await _register('fail@example.com')
     with patch('verys.routes.verification.aiosmtplib.send', new_callable=AsyncMock, side_effect=Exception('SMTP error')):
         res = client.post(
             '/verification',

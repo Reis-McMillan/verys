@@ -1,69 +1,58 @@
+import uuid
 from datetime import datetime, timezone
 
 from verys.models.consent import Consent
+from verys.routes.oauth2 import _covers_scopes
+
+IDENTITY_ID = str(uuid.uuid4())
 
 
-def test_grant(session):
-    consent = Consent.grant(
-        session,
-        identity_email="consent@example.com",
-        client_id="consent-test-client",
-        scopes=["openid", "email"],
-    )
+async def test_grant(db):
+    consent = await Consent.upsert({
+        'identity_id': IDENTITY_ID,
+        'client_id': 'consent-test-client',
+        'scopes': ['openid', 'email'],
+    })
 
-    assert isinstance(consent.id, int)
-    assert consent.identity_email == "consent@example.com"
-    assert consent.client_id == "consent-test-client"
-    assert consent.scopes == ["openid", "email"]
-    assert consent.granted_at <= datetime.now(timezone.utc)
+    assert consent['identity_id'] == IDENTITY_ID
+    assert consent['client_id'] == 'consent-test-client'
+    assert consent['scopes'] == ['openid', 'email']
+    assert consent['granted_at'] <= datetime.now(timezone.utc)
 
 
-def test_get(session):
-    found = Consent.get(session, "consent@example.com", "consent-test-client")
+async def test_get(db):
+    found = await Consent.get(identity_id=IDENTITY_ID, client_id='consent-test-client')
     assert found is not None
-    assert found.scopes == ["openid", "email"]
+    assert found['scopes'] == ['openid', 'email']
 
 
-def test_get_not_found(session):
-    found = Consent.get(session, "nobody@example.com", "no-client")
-    assert found is None
+async def test_get_not_found(db):
+    assert await Consent.get(identity_id=str(uuid.uuid4()), client_id='no-client') is None
 
 
-def test_covers_scopes(session):
-    consent = Consent.get(session, "consent@example.com", "consent-test-client")
-    assert consent.covers_scopes(["openid"]) == True
-    assert consent.covers_scopes(["openid", "email"]) == True
-    assert consent.covers_scopes(["openid", "profile"]) == False
+async def test_covers_scopes(db):
+    consent = await Consent.get(identity_id=IDENTITY_ID, client_id='consent-test-client')
+    assert _covers_scopes(consent, ['openid']) is True
+    assert _covers_scopes(consent, ['openid', 'email']) is True
+    assert _covers_scopes(consent, ['openid', 'profile']) is False
 
 
-def test_grant_updates_existing(session):
-    # Grant with new scopes should update the existing record
-    consent = Consent.grant(
-        session,
-        identity_email="consent@example.com",
-        client_id="consent-test-client",
-        scopes=["openid", "email", "profile"],
-    )
+async def test_grant_updates_existing(db):
+    consent = await Consent.get(identity_id=IDENTITY_ID, client_id='consent-test-client')
+    consent['scopes'] = ['openid', 'email', 'profile']
+    consent['granted_at'] = datetime.now(timezone.utc)
+    updated = await Consent.upsert(consent)
+    assert updated['scopes'] == ['openid', 'email', 'profile']
 
-    assert consent.scopes == ["openid", "email", "profile"]
-
-    # Verify only one record exists
-    found = Consent.get(session, "consent@example.com", "consent-test-client")
-    assert found.id == consent.id
-    assert found.scopes == ["openid", "email", "profile"]
+    # Still exactly one live record for this identity/client pair
+    assert len(await Consent.all(identity_id=IDENTITY_ID, client_id='consent-test-client')) == 1
 
 
-def test_multiple_clients(session):
-    Consent.grant(
-        session,
-        identity_email="consent@example.com",
-        client_id="another-client",
-        scopes=["openid"],
-    )
+async def test_multiple_clients(db):
+    await Consent.upsert({
+        'identity_id': IDENTITY_ID,
+        'client_id': 'another-client',
+        'scopes': ['openid'],
+    })
 
-    c1 = Consent.get(session, "consent@example.com", "consent-test-client")
-    c2 = Consent.get(session, "consent@example.com", "another-client")
-
-    assert c1 is not None
-    assert c2 is not None
-    assert c1.id != c2.id
+    assert len(await Consent.all(identity_id=IDENTITY_ID)) == 2

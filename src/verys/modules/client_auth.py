@@ -2,7 +2,6 @@ import base64
 import logging
 
 import bcrypt
-from sqlmodel import Session
 from starlette.requests import Request
 
 from verys.models.oauth2_client import OAuthClient
@@ -18,15 +17,14 @@ def verify_client_secret(secret: str, hashed: str) -> bool:
     return bcrypt.checkpw(secret.encode(), hashed.encode())
 
 
-def authenticate_client(
+async def authenticate_client(
     request: Request,
-    session: Session,
     form_client_id: str | None = None,
     form_client_secret: str | None = None,
-) -> OAuthClient | None:
+) -> dict | None:
     """
     Authenticate an OAuth2 client using Basic auth or POST body credentials.
-    Returns the OAuthClient if authenticated, None otherwise.
+    Returns the client document if authenticated, None otherwise.
     """
     client_id = None
     client_secret = None
@@ -48,21 +46,21 @@ def authenticate_client(
     if not client_id:
         return None
 
-    client = OAuthClient.get_by_client_id(session, client_id)
+    client = await OAuthClient.get(client_id=client_id)
     if not client:
         logger.warning("Client not found: %s", client_id)
         return None
 
     # Public clients (PKCE-only) don't need a secret
-    if client.is_public or client.token_endpoint_auth_method == "none":
+    if client["is_public"] or client["token_endpoint_auth_method"] == "none":
         return client
 
     # Confidential clients must provide a valid secret
-    if not client_secret or not client.client_secret_hash:
+    if not client_secret or not client["client_secret_hash"]:
         logger.warning("Missing client secret for: %s", client_id)
         return None
 
-    if not verify_client_secret(client_secret, client.client_secret_hash):
+    if not verify_client_secret(client_secret, client["client_secret_hash"]):
         logger.warning("Invalid client secret for: %s", client_id)
         return None
 

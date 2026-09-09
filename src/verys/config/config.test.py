@@ -1,7 +1,8 @@
 import base64
 import os
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://verys:verys@localhost:5432/verys")
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "verys_test")
 VERIFY_FROM_ADDR = 'support@mcmlln.dev'
 USERNAME_SMTP = os.environ.get('USERNAME_SMTP')
 PASSWORD_SMTP = os.environ.get('PASSWORD_SMTP')

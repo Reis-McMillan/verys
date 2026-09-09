@@ -6,8 +6,8 @@ from verys.modules.jwt import create_signed_jwt, _get_private_key
 from verys.config import config
 
 
-def test_userinfo_get(session, client):
-    admin = Identity.get(session, 'admin@mcmlln.dev')
+async def test_userinfo_get(db, client):
+    admin = await Identity.get(email='admin@mcmlln.dev')
     token = create_signed_jwt(admin, ['openid', 'email'], config.ISSUER)
     res = client.get(
         '/userinfo',
@@ -15,13 +15,13 @@ def test_userinfo_get(session, client):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body['sub'] == str(admin.id)
+    assert body['sub'] == admin['id']
     assert body['email'] == 'admin@mcmlln.dev'
     assert body['email_verified'] == True
 
 
-def test_userinfo_post(session, client):
-    admin = Identity.get(session, 'admin@mcmlln.dev')
+async def test_userinfo_post(db, client):
+    admin = await Identity.get(email='admin@mcmlln.dev')
     token = create_signed_jwt(admin, ['openid'], config.ISSUER)
     res = client.post(
         '/userinfo',
@@ -29,11 +29,11 @@ def test_userinfo_post(session, client):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body['sub'] == str(admin.id)
+    assert body['sub'] == admin['id']
 
 
-def test_userinfo_includes_roles(session, client):
-    admin = Identity.get(session, 'admin@mcmlln.dev')
+async def test_userinfo_includes_roles(db, client):
+    admin = await Identity.get(email='admin@mcmlln.dev')
     token = create_signed_jwt(admin, ['openid'])
     res = client.get(
         '/userinfo',
@@ -57,11 +57,11 @@ def test_userinfo_invalid_token(client):
     assert res.status_code == 401
 
 
-def test_userinfo_expired_token(session, client):
-    admin = Identity.get(session, 'admin@mcmlln.dev')
+async def test_userinfo_expired_token(db, client):
+    admin = await Identity.get(email='admin@mcmlln.dev')
     now = datetime.now(timezone.utc)
     payload = {
-        'sub': str(admin.id),
+        'sub': admin['id'],
         'roles': ['admin'],
         'iat': now - timedelta(minutes=10),
         'exp': now - timedelta(minutes=5),

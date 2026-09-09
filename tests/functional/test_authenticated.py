@@ -1,9 +1,9 @@
+import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
 import jwt as jwt_lib
 
-from verys.app import app
-from verys.modules.jwt import create_signed_jwt, _get_private_key
+from verys.models import Identity
+from verys.modules.jwt import _get_private_key
 
 
 def test_not_requires_auth(client):
@@ -48,12 +48,11 @@ def test_jwt_auth_success(client, admin_jwt):
     assert res.status_code == 200
 
 
-def test_jwt_auth_expired_signature(session, client):
-    from verys.models import Identity
-    admin = Identity.get(session, 'admin@mcmlln.dev')
+async def test_jwt_auth_expired_signature(db, client):
+    admin = await Identity.get(email='admin@mcmlln.dev')
     now = datetime.now(timezone.utc)
     payload = {
-        'sub': str(admin.id),
+        'sub': admin['id'],
         'roles': ['admin'],
         'iat': now - timedelta(minutes=10),
         'exp': now - timedelta(minutes=5)
@@ -103,7 +102,7 @@ def test_invalid_sub_claim(client):
 def test_no_identity(client):
     now = datetime.now(timezone.utc)
     payload = {
-        'sub': '-1',
+        'sub': str(uuid.uuid4()),
         'roles': [],
         'iat': now,
         'exp': now + timedelta(minutes=5)

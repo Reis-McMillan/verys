@@ -1,7 +1,7 @@
 import logging
+import uuid
 
 import jwt
-from sqlmodel import Session
 from starlette.authentication import (
     AuthCredentials,
     AuthenticationBackend,
@@ -12,7 +12,6 @@ from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 
 from verys.config import config
-from verys.database import engine
 from verys.models.identity import Identity
 from verys.modules.jwt import get_public_key_pem
 
@@ -20,13 +19,9 @@ logger = logging.getLogger("verys.auth")
 
 
 class User(SimpleUser):
-    """Authenticated principal attached to ``request.user``.
+    """Authenticated principal attached to ``request.user``."""
 
-    Holds plain values (not the live ORM object) so it stays valid after the
-    DB session used during authentication is closed.
-    """
-
-    def __init__(self, *, id: int, email: str, roles: set[str], token_scopes: list[str]):
+    def __init__(self, *, id: str, email: str, roles: set[str], token_scopes: list[str]):
         super().__init__(email)
         self.id = id
         self.email = email
@@ -63,6 +58,14 @@ def _requires_auth(method: str, path: str) -> bool:
     return False
 
 
+def parse_subject(sub) -> str | None:
+    """Return the identity id encoded in a JWT ``sub`` claim, or ``None``."""
+    try:
+        return str(uuid.UUID(str(sub)))
+    except (TypeError, ValueError):
+        return None
+
+
 class BearerToken(AuthenticationBackend):
     async def authenticate(self, conn: HTTPConnection):
         if not _requires_auth(conn.scope["method"], conn.url.path):
@@ -93,23 +96,22 @@ class BearerToken(AuthenticationBackend):
             logger.warning("Auth failed: JWT missing 'sub' claim")
             raise AuthenticationError("Not authenticated")
 
-        try:
-            identity_id = int(sub)
-        except (TypeError, ValueError):
+        identity_id = parse_subject(sub)
+        if identity_id is None:
             logger.warning("Auth failed: 'sub' claim is not a valid identity id: %s", sub)
             raise AuthenticationError("Not authenticated")
 
-        with Session(engine) as session:
-            identity = Identity.get_by_id(session, identity_id)
-            if not identity:
-                logger.warning("Auth failed: no identity for id %s", identity_id)
-                raise AuthenticationError("Not authenticated")
-            user = User(
-                id=identity.id,
-                email=identity.email,
-                roles={r.name for r in identity.roles},
-                token_scopes=decoded.get("scopes", []),
-            )
+        identity = await Identity.get(id=identity_id, closed=False)
+        if not identity:
+            logger.warning("Auth failed: no identity for id %s", identity_id)
+            raise AuthenticationError("Not authenticated")
+
+        user = User(
+            id=identity["id"],
+            email=identity["email"],
+            roles={r["name"] for r in identity["roles"]},
+            token_scopes=decoded.get("scopes", []),
+        )
 
         logger.info("Authenticated %s via JWT", user.email)
         return AuthCredentials(["authenticated"]), user

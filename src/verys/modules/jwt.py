@@ -1,14 +1,11 @@
 import base64
 import hashlib
 import json
-from sqlmodel import Session
 import jwt
 from datetime import datetime, timedelta, timezone
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, Encoding, PublicFormat
 
 from verys.config import config
-from verys.models import Scope, ExternalToken
-from verys.models.identity import Identity
 
 _private_key = None
 _kid = None
@@ -58,16 +55,16 @@ def _compute_at_hash(access_token: str) -> str:
 
 
 def create_signed_jwt(
-    identity: Identity,
+    identity: dict,
     scopes: list[str],
     audience: str = None,
 ) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "iss": config.ISSUER,
-        "sub": str(identity.id),
+        "sub": str(identity["id"]),
         "aud": config.ISSUER if not audience else audience,
-        "roles": [r.name for r in identity.roles],
+        "roles": [r["name"] for r in identity["roles"]],
         "iat": now,
         "exp": now + timedelta(seconds=config.JWT_EXPIRY),
         "scopes": scopes,
@@ -81,7 +78,7 @@ def create_signed_jwt(
 
 
 def create_id_token(
-    identity: Identity,
+    identity: dict,
     client_id: str,
     client_scopes: list[str],
     nonce: str | None,
@@ -91,7 +88,7 @@ def create_id_token(
     now = datetime.now(timezone.utc)
     payload = {
         "iss": config.ISSUER,
-        "sub": str(identity.id),
+        "sub": str(identity["id"]),
         "aud": client_id,
         "exp": now + timedelta(seconds=config.ID_TOKEN_EXPIRY),
         "iat": now,
@@ -101,21 +98,22 @@ def create_id_token(
     scope_set = set(client_scopes)
 
     if "email" in scope_set:
-        payload["email"] = identity.email
-        payload["email_verified"] = identity.email_verified
+        payload["email"] = identity["email"]
+        payload["email_verified"] = identity["email_verified"]
 
     if "profile" in scope_set:
-        payload["given_name"] = identity.first_name
-        payload["family_name"] = identity.last_name
-        payload["name"] = f"{identity.first_name} {identity.last_name}"
-        payload["origination"] = identity.origination.isoformat() if identity.origination else None
+        payload["given_name"] = identity["first_name"]
+        payload["family_name"] = identity["last_name"]
+        payload["name"] = f"{identity['first_name']} {identity['last_name']}"
+        origination = identity.get("origination")
+        payload["origination"] = origination.isoformat() if origination else None
 
     if nonce:
         payload["nonce"] = nonce
     if access_token:
         payload["at_hash"] = _compute_at_hash(access_token)
-    if identity.roles:
-        payload["roles"] = [r.name for r in identity.roles]
+    if identity["roles"]:
+        payload["roles"] = [r["name"] for r in identity["roles"]]
 
     return jwt.encode(
         payload,

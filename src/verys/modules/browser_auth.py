@@ -1,14 +1,14 @@
 from datetime import datetime, timezone
 
-from sqlmodel import Session
 from starlette.requests import Request
 
 from verys.config import config
 from verys.models.identity import Identity
 from verys.modules.cookie import decrypt_cookie
+from verys.modules.email import normalize_email
 
 
-def get_browser_identity(request: Request, session: Session) -> Identity | None:
+async def get_browser_identity(request: Request) -> dict | None:
     """Identify user from token/token_iv cookies during the authorize flow."""
     token = request.cookies.get(config.ENCRYPT_COOKIE_NAME)
     token_iv = request.cookies.get(f"{config.ENCRYPT_COOKIE_NAME}_iv")
@@ -20,11 +20,11 @@ def get_browser_identity(request: Request, session: Session) -> Identity | None:
     except Exception:
         return None
 
-    identity = Identity.get(session, decrypted["email"])
+    identity = await Identity.get(email=normalize_email(decrypted["email"]), closed=False)
     if (
         not identity
-        or identity.auth_key != decrypted["auth_key"]
-        or datetime.now(timezone.utc) > identity.expires
+        or identity["auth_key"] != decrypted["auth_key"]
+        or datetime.now(timezone.utc) > identity["expires"]
     ):
         return None
 

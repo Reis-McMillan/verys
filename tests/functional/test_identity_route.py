@@ -1,23 +1,16 @@
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
-import jwt
 
 from verys.models import Identity
 from verys.modules.jwt import create_signed_jwt
+from tests.helpers import new_identity
 
 
-def _ensure_identity(session, email):
+async def _ensure_identity(email):
     """Fetch or create a non-admin identity for JWT tests."""
-    identity = Identity.get(session, email)
+    identity = await Identity.get(email=email)
     if identity is None:
-        identity = Identity.new(
-            session,
-            'Test',
-            'User',
-            email,
-            Identity.make_auth_key(),
-            datetime.now(timezone.utc) + timedelta(days=30),
-        )
+        identity = await new_identity(email)
     return identity
 
 
@@ -30,13 +23,9 @@ def test_all(admin_jwt, client):
     assert len(res.json()['identities']) == 2
 
 
-def test_all_no_admin(client, session):
-    identity = Identity.new(
-        session,
-        'Abella',
-        'Danger',
-        'abella.danger@pornhub.com',
-        'missionary',
+async def test_all_no_admin(db, client):
+    identity = await new_identity(
+        'abella.danger@pornhub.com', 'Abella', 'Danger', 'missionary',
         datetime.now(timezone.utc) + timedelta(days=1),
     )
     jwt = create_signed_jwt(identity, ['openid'])
@@ -80,8 +69,8 @@ def test_create_with_expires(admin_jwt, client):
     assert res.headers['Location'] == f'/identity/{url_safe_email}'
 
 
-def test_create_no_admin(client, session):
-    id = Identity.get(session, 'stewie.griffin@quahog.com')
+async def test_create_no_admin(db, client):
+    id = await Identity.get(email='stewie.griffin@quahog.com')
     jwt = create_signed_jwt(id, ['openid'])
     res = client.post(
         '/identity',
@@ -114,10 +103,10 @@ def test_get_not_found(admin_jwt, client):
     assert res.json()['error'] == 'Identity not found'
 
 
-def test_get_not_admin(client, session):
-    """Test that admin can request their own identity as a JWT"""
+async def test_get_not_admin(db, client):
+    """Test that a non-admin cannot read another identity"""
     email = quote('admin@mcmlln.dev')
-    jwt = create_signed_jwt(_ensure_identity(session, 'jeevacation@gmail.com'), ['openid'])
+    jwt = create_signed_jwt(await _ensure_identity('jeevacation@gmail.com'), ['openid'])
     res = client.get(
         f'/identity/{email}',
         headers={'Authorization': f'Bearer {jwt}'},
@@ -138,8 +127,8 @@ def test_update(admin_jwt, client):
     assert res.headers['Location'] == f'/identity/{email}'
 
 
-def test_update_no_admin(client, session):
-    jwt = create_signed_jwt(_ensure_identity(session, 'jeevacation@gmail.com'), ['openid'])
+async def test_update_no_admin(db, client):
+    jwt = create_signed_jwt(await _ensure_identity('jeevacation@gmail.com'), ['openid'])
     email = quote('stewie.griffin@quahog.com')
     expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
     res = client.put(
@@ -175,13 +164,16 @@ def test_update_no_id(admin_jwt, client):
     assert res.json()['error'] == 'No Identity found.'
 
 
-def test_delete(admin_jwt, client):
+async def test_delete(db, admin_jwt, client):
     email = quote('peter.griffin@quahog.com')
     res = client.delete(
         f'/identity/{email}',
         headers={'Authorization': f'Bearer {admin_jwt}'},
     )
     assert res.status_code == 200
+
+    closed = await Identity.get(email='peter.griffin@quahog.com')
+    assert closed['closed'] is True
 
 
 def test_delete_no_id(admin_jwt, client):
@@ -194,8 +186,8 @@ def test_delete_no_id(admin_jwt, client):
     assert res.json()['error'] == "Identity not found"
 
 
-def test_delete_not_admin(client, session):
-    jwt = create_signed_jwt(_ensure_identity(session, 'jeevacation@gmail.com'), ['openid'])
+async def test_delete_not_admin(db, client):
+    jwt = create_signed_jwt(await _ensure_identity('jeevacation@gmail.com'), ['openid'])
     email = quote('peter.griffin@quahog.com')
     res = client.delete(
         f'/identity/{email}',
@@ -205,9 +197,9 @@ def test_delete_not_admin(client, session):
     assert res.json()['error'] == "Not authorized to perform this action."
 
 
-def test_logout(client, session):
-    id = Identity.get(session, 'stewie.griffin@quahog.com')
-    old_auth_key = id.auth_key
+async def test_logout(db, client):
+    id = await Identity.get(email='stewie.griffin@quahog.com')
+    old_auth_key = id['auth_key']
     jwt = create_signed_jwt(id, ['openid'])
     res = client.post(
         '/identity/logout',
@@ -215,34 +207,37 @@ def test_logout(client, session):
     )
     assert res.status_code == 201
 
-    session.expire_all()
-    id = Identity.get(session, 'stewie.griffin@quahog.com')
-    assert id.auth_key != old_auth_key
+    id = await Identity.get(email='stewie.griffin@quahog.com')
+    assert id['auth_key'] != old_auth_key
 
 
-def test_admin_logout(admin_jwt, client):
-    email = quote('stewie.griffin@quahog.com')
+async def test_admin_logout(db, admin_jwt, client):
+    stewie = await Identity.get(email='stewie.griffin@quahog.com')
     res = client.post(
-        f'identity/{email}/logout',
+        f"identity/{stewie['id']}/logout",
         headers={'Authorization': f'Bearer {admin_jwt}'},
     )
     assert res.status_code == 201
 
+    after = await Identity.get(email='stewie.griffin@quahog.com')
+    assert after['auth_key'] != stewie['auth_key']
 
-def test_admin_logout_no_id(admin_jwt, client):
-    email = quote('peter.griffin@quahog.com')
+
+async def test_admin_logout_no_id(db, admin_jwt, client):
+    # peter was closed above, so his id no longer resolves to an open identity
+    peter = await Identity.get(email='peter.griffin@quahog.com')
     res = client.post(
-        f'identity/{email}/logout',
+        f"identity/{peter['id']}/logout",
         headers={'Authorization': f'Bearer {admin_jwt}'},
     )
     assert res.status_code == 404
 
 
-def test_logout_not_admin(client, session):
-    jwt = create_signed_jwt(_ensure_identity(session, 'jeevacation@gmail.com'), ['openid'])
-    email = quote('stewie.griffin@quahog.com')
+async def test_logout_not_admin(db, client):
+    jwt = create_signed_jwt(await _ensure_identity('jeevacation@gmail.com'), ['openid'])
+    stewie = await Identity.get(email='stewie.griffin@quahog.com')
     res = client.post(
-        f'/identity/{email}/logout',
+        f"/identity/{stewie['id']}/logout",
         headers={'Authorization': f'Bearer {jwt}'},
     )
     assert res.status_code == 403

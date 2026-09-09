@@ -1,51 +1,48 @@
-from datetime import datetime, timezone
-from pydantic import BaseModel
-from typing import List, Optional
+from datetime import datetime
 
-from verys.modules.encryption import encrypt_field, decrypt_field
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+
+from verys.models.base import Base, utcnow
+from verys.modules.encryption import decrypt_field, encrypt_field
 
 
 class ExternalProviderSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider_id: str
     display_name: str
-    # to-do: finish
+    client_id: str
+    client_secret: str  # encrypted at rest, plain in memory
+    authorization_endpoint: HttpUrl
+    token_endpoint: HttpUrl
+    scopes: list[str] = Field(default_factory=list)
+    jwks_uri: HttpUrl | None = None
+    userinfo_endpoint: HttpUrl | None = None
+    enabled: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
 
-# class ExternalProvider(SQLModel, table=True):
-#     __tablename__ = "external_provider"
 
-#     id: int | None = Field(default=None, primary_key=True)
-#     provider_id: str = Field(unique=True, index=True)
-#     display_name: str = Field()
-#     client_id: str = Field()
-#     client_secret_encrypted: str = Field()
-#     authorization_endpoint: str = Field()
-#     token_endpoint: str = Field()
-#     scopes: List[str] = Field(
-#         default_factory=list,
-#         sa_column=Column(ARRAY(String)),
-#     )
-#     jwks_uri: Optional[str] = Field(default=None)
-#     userinfo_endpoint: Optional[str] = Field(default=None)
-#     enabled: bool = Field(default=True)
-#     created_at: datetime = Field(
-#         default_factory=lambda: datetime.now(timezone.utc),
-#         sa_column=Column(DateTime(timezone=True)),
-#     )
+def _decrypt(doc: dict | None) -> dict | None:
+    if doc and doc.get("client_secret"):
+        doc["client_secret"] = decrypt_field(doc["client_secret"])
+    return doc
 
-#     @property
-#     def client_secret(self) -> str:
-#         return decrypt_field(self.client_secret_encrypted)
 
-#     @client_secret.setter
-#     def client_secret(self, value: str):
-#         self.client_secret_encrypted = encrypt_field(value)
+class ExternalProvider(Base):
+    name = "external_provider"
+    identity_fields = ["provider_id"]
+    schema = ExternalProviderSchema
 
-#     @classmethod
-#     def get_by_provider_id(cls, session: Session, provider_id: str) -> Optional["ExternalProvider"]:
-#         statement = select(cls).where(cls.provider_id == provider_id)
-#         return session.exec(statement).first()
+    @classmethod
+    async def upsert(cls, obj: dict) -> dict:
+        doc = cls.to_doc(obj)
+        doc["client_secret"] = encrypt_field(doc["client_secret"])
+        return await super().upsert(doc)
 
-#     @classmethod
-#     def all(cls, session: Session) -> list["ExternalProvider"]:
-#         statement = select(cls)
-#         return list(session.exec(statement).all())
+    @classmethod
+    async def get(cls, **filter) -> dict | None:
+        return _decrypt(await super().get(**filter))
+
+    @classmethod
+    async def all(cls, **filter) -> list[dict]:
+        return [_decrypt(doc) for doc in await super().all(**filter)]

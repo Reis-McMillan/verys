@@ -1,13 +1,13 @@
 import logging
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy.exc import IntegrityError
+from pymongo.errors import DuplicateKeyError
 from starlette.requests import Request
 from starlette.routing import Route
 
-from verys.models.role import Role
 from verys.models.identity import Identity
-from verys.models.identity_role import IdentityRole
+from verys.models.role import Role
+from verys.modules.email import normalize_email
 from verys.modules.http import json_error, json_message, check_body
 
 logger = logging.getLogger("verys.roles")
@@ -24,11 +24,14 @@ def _require_admin(request: Request, action: str):
     return None
 
 
+def _has_role(identity: dict, role: dict) -> bool:
+    return any(r["id"] == role["id"] for r in identity["roles"])
+
+
 async def list_roles(request: Request):
     if err := _require_admin(request, "list roles"):
         return err
-    session = request.state.session
-    return json_message("Roles retrieved.", roles=[r.name for r in Role.all(session)])
+    return json_message("Roles retrieved.", roles=sorted(r["name"] for r in await Role.all()))
 
 
 async def create_role(request: Request):
@@ -38,13 +41,11 @@ async def create_role(request: Request):
     if err:
         return err
 
-    session = request.state.session
     try:
-        Role.new(session, body.name)
+        await Role.upsert({"name": body.name})
     except ValidationError as e:
         return json_error(str(e), status_code=400)
-    except IntegrityError:
-        session.rollback()
+    except DuplicateKeyError:
         return json_error(f"Role {body.name} already exists.", status_code=409)
 
     return json_message(
@@ -58,14 +59,13 @@ async def get_role(request: Request):
     if err := _require_admin(request, "access role list"):
         return err
 
-    session = request.state.session
     role_name = request.path_params["role_name"]
-    role = Role.get(session, role_name)
+    role = await Role.get(name=role_name)
     if not role:
         return json_error(f"Role {role_name} does not exist.", status_code=404)
-    identity_ids = IdentityRole.list_role_identities(session, role.id)
-    identities = Identity.get_by_id(session, identity_ids) if identity_ids else []
-    identity_emails = [i.email for i in identities]
+
+    identities = await Identity.all(**{"roles.id": role["id"]}, closed=False)
+    identity_emails = [i["email"] for i in identities]
 
     return json_message(
         "Successfully retrieved role and associated identities.",
@@ -77,10 +77,13 @@ async def delete_role(request: Request):
     if err := _require_admin(request, "delete a role"):
         return err
 
-    session = request.state.session
     role_name = request.path_params["role_name"]
-    if not Role.delete(session, role_name):
+    role = await Role.get(name=role_name)
+    if not role:
         return json_error(f"Role {role_name} does not exist.", status_code=404)
+
+    # Role.pipeline strips the embedded copy from every identity.
+    await Role.delete(id=role["id"])
 
     return json_message(f"Successfully deleted role {role_name}.")
 
@@ -91,19 +94,18 @@ async def assign_role(request: Request):
     if err := _require_admin(request, f"assign role {role_name} to {email}"):
         return err
 
-    session = request.state.session
-    role = Role.get(session, role_name)
+    role = await Role.get(name=role_name)
     if not role:
         return json_error(f"Role {role_name} does not exist.", status_code=404)
-    identity = Identity.get(session, email)
+    identity = await Identity.get(email=normalize_email(email), closed=False)
     if not identity:
         return json_error(f"Identity {email} does not exist.", status_code=404)
 
-    try:
-        IdentityRole.add_identity_role(session, identity.id, role.id)
-    except IntegrityError:
-        session.rollback()
+    if _has_role(identity, role):
         return json_message(f"Identity {email} already has role {role_name}.")
+
+    identity["roles"] = sorted([*identity["roles"], role], key=lambda r: r["name"])
+    await Identity.upsert(identity)
 
     logger.info("Role %s assigned to %s by %s", role_name, email, request.user.email)
     return json_message(f"Role {role_name} assigned to {email}.", status_code=201)
@@ -115,18 +117,20 @@ async def revoke_role(request: Request):
     if err := _require_admin(request, f"revoke role {role_name} from {email}"):
         return err
 
-    session = request.state.session
-    role = Role.get(session, role_name)
+    role = await Role.get(name=role_name)
     if not role:
         return json_error(f"Role {role_name} does not exist.", status_code=404)
-    identity = Identity.get(session, email)
+    identity = await Identity.get(email=normalize_email(email), closed=False)
     if not identity:
         return json_error(f"Identity {email} does not exist.", status_code=404)
 
-    if not IdentityRole.remove_identity_role(session, identity.id, role.id):
+    if not _has_role(identity, role):
         return json_error(
             f"Identity {email} does not have role {role_name}.", status_code=404
         )
+
+    identity["roles"] = [r for r in identity["roles"] if r["id"] != role["id"]]
+    await Identity.upsert(identity)
 
     logger.info("Role %s revoked from %s by %s", role_name, email, request.user.email)
     return json_message(f"Role {role_name} revoked from {email}.")

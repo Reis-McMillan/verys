@@ -1,51 +1,34 @@
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import datetime, timedelta
 
-from sqlalchemy import Column, DateTime
-from sqlmodel import Field, SQLModel, Session, select
+from pydantic import BaseModel, ConfigDict, Field
 
-OAUTH2_SESSION_TTL = 10 * 60  # 10 minutes
+from verys.models.base import Base, utcnow
+
+OAUTH2_SESSION_TTL = 10 * 60  # 10 minutes; see the TTL index in database.py
 
 
-class OAuth2Session(SQLModel, table=True):
-    __tablename__ = "oauth2_session"
+class OAuth2SessionSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    id: int | None = Field(default=None, primary_key=True)
-    session_id: str = Field(
-        default_factory=lambda: str(uuid.uuid4()),
-        unique=True,
-        index=True,
-    )
-    client_id: str = Field()
-    redirect_uri: str = Field()
-    response_type: str = Field()
-    scope: str = Field()
-    state: Optional[str] = Field(default=None)
-    nonce: Optional[str] = Field(default=None)
-    code_challenge: Optional[str] = Field(default=None)
-    code_challenge_method: Optional[str] = Field(default=None)
-    csrf_token: Optional[str] = Field(default=None)
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        sa_column=Column(DateTime(timezone=True)),
-    )
+    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    client_id: str
+    redirect_uri: str
+    response_type: str
+    scope: str
+    state: str | None = None
+    nonce: str | None = None
+    code_challenge: str | None = None
+    code_challenge_method: str | None = None
+    csrf_token: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
 
-    def is_expired(self) -> bool:
-        return datetime.now(timezone.utc) > self.created_at + timedelta(
-            seconds=OAUTH2_SESSION_TTL
-        )
 
-    @classmethod
-    def get_by_session_id(cls, session: Session, session_id: str):
-        statement = select(cls).where(cls.session_id == session_id)
-        return session.exec(statement).first()
+class OAuth2Session(Base):
+    name = "oauth2_session"
+    identity_fields = ["session_id"]
+    schema = OAuth2SessionSchema
 
-    @classmethod
-    def cleanup_expired(cls, session: Session):
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=OAUTH2_SESSION_TTL)
-        statement = select(cls).where(cls.created_at < cutoff)
-        expired = session.exec(statement).all()
-        for s in expired:
-            session.delete(s)
-        session.commit()
+    @staticmethod
+    def is_expired(doc: dict) -> bool:
+        return utcnow() > doc["created_at"] + timedelta(seconds=OAUTH2_SESSION_TTL)

@@ -8,19 +8,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: verys
-          POSTGRES_PASSWORD: verys
-          POSTGRES_DB: verys
+      mongo:
+        image: mongo:8
         ports:
-          - 5432:5432
+          - 27017:27017
         options: >-
-          --health-cmd="pg_isready -U verys"
+          --health-cmd="mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
+    env:
+      MONGO_URI: mongodb://localhost:27017
 
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +32,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y libpq-dev
-          uv sync --frozen --extra dev
+        run: uv sync --frozen
 
       - name: Use test config
         run: cp src/verys/config/config.test.py src/verys/config/config.py

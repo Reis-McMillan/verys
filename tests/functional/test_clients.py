@@ -3,16 +3,20 @@ import pytest
 import respx
 
 from verys.config import config
+from verys.models import Identity
 from verys.modules.jwt import create_signed_jwt
 
 
-def test_create_client_no_admin(client, session):
-    from verys.models import Identity
-    svc = Identity.get(session, 'service@mcmlln.dev')
-    jwt = create_signed_jwt(svc, ['openid'])
+@pytest.fixture(scope='module')
+async def service_jwt(db):
+    svc = await Identity.get(email='service@mcmlln.dev')
+    return create_signed_jwt(svc, ['openid'])
+
+
+def test_create_client_no_admin(client, service_jwt):
     res = client.post(
         '/clients/',
-        headers={'Authorization': f'Bearer {jwt}'},
+        headers={'Authorization': f'Bearer {service_jwt}'},
         json={
             'client_name': 'Unauthorized App',
             'redirect_uris': ['https://bad.example.com/cb'],
@@ -32,7 +36,6 @@ def test_create_client_bad_body(client, admin_jwt):
         }
     )
     assert res.status_code == 400
-    print(res.json())
 
 
 def test_create_client_unknown_scope(client, admin_jwt):
@@ -86,13 +89,10 @@ def test_create_public_client(admin_jwt, client):
     assert body['is_public'] == True
 
 
-def test_list_clients_no_admin(client, session):
-    from verys.models import Identity
-    svc = Identity.get(session, 'service@mcmlln.dev')
-    jwt = create_signed_jwt(svc, ['openid'])
+def test_list_clients_no_admin(client, service_jwt):
     res = client.get(
         '/clients/',
-        headers={'Authorization': f'Bearer {jwt}'},
+        headers={'Authorization': f'Bearer {service_jwt}'},
     )
     assert res.status_code == 403
     assert res.json()['error'] == "Unauthorized to perform this action"
@@ -109,13 +109,10 @@ def test_list_clients(admin_jwt, client):
     assert len(body['clients']) >= 2  # created in previous tests
 
 
-def test_get_client_no_admin(session, client):
-    from verys.models import Identity
-    svc = Identity.get(session, 'service@mcmlln.dev')
-    jwt = create_signed_jwt(svc, ['openid'])
+def test_get_client_no_admin(client, service_jwt):
     res = client.get(
         '/clients/fake-client',
-        headers={'Authorization': f'Bearer {jwt}'},
+        headers={'Authorization': f'Bearer {service_jwt}'},
     )
     assert res.status_code == 403
     assert res.json()['error'] == "Unauthorized to perform this action"
@@ -161,7 +158,6 @@ def client_id(admin_jwt, client, mock_prm):
 
 
 def test_get_client(admin_jwt, client, client_id):
-    # First create one to get a known client_id
     res = client.get(
         f'/clients/{client_id}',
         headers={'Authorization': f'Bearer {admin_jwt}'},
@@ -170,16 +166,15 @@ def test_get_client(admin_jwt, client, client_id):
     body = res.json()
     assert body['client_id'] == client_id
     assert body['client_name'] == 'Test App'
+    assert body['required_scopes'] == ['openid', 'profile', 'email']
     assert 'client_secret' not in body  # secret should never be returned
 
 
-def test_update_client_no_admin(session, client):
-    from verys.models import Identity
-    svc = Identity.get(session, 'service@mcmlln.dev')
-    jwt = create_signed_jwt(svc, ['openid'])
-    res = client.get(
+def test_update_client_no_admin(client, service_jwt):
+    res = client.put(
         '/clients/fake-client',
-        headers={'Authorization': f'Bearer {jwt}'},
+        headers={'Authorization': f'Bearer {service_jwt}'},
+        json={'client_name': 'Nope'}
     )
     assert res.status_code == 403
     assert res.json()['error'] == "Unauthorized to perform this action"
@@ -238,13 +233,10 @@ def test_update_client(admin_jwt, client, client_id):
     assert len(body['redirect_uris']) == 2
 
 
-def test_delete_client(session, client):
-    from verys.models import Identity
-    svc = Identity.get(session, 'service@mcmlln.dev')
-    jwt = create_signed_jwt(svc, ['openid'])
+def test_delete_client_no_admin(client, service_jwt):
     res = client.delete(
         '/clients/fake-client',
-        headers={'Authorization': f'Bearer {jwt}'},
+        headers={'Authorization': f'Bearer {service_jwt}'},
     )
     assert res.status_code == 403
     assert res.json()['error'] == "Unauthorized to perform this action"

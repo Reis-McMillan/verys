@@ -1,16 +1,12 @@
 services:
-  postgres:
-    image: postgres:17
-    container_name: verys-postgres
+  mongo:
+    image: mongo:8
+    container_name: verys-mongo
     restart: unless-stopped
     ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_USER: verys
-      POSTGRES_PASSWORD: verys
-      POSTGRES_DB: verys
+      - "27017:27017"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mongodata:/data/db
 
   verys:
     build:
@@ -22,9 +18,10 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - postgres
+      - mongo
     environment:
-      DATABASE_URL: postgresql://verys:verys@postgres:5432/verys
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB_NAME: verys
       USERNAME_SMTP: ${USERNAME_SMTP}
       PASSWORD_SMTP: ${PASSWORD_SMTP}
       JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}
@@ -35,4 +32,4 @@ services:
       VERYS_CLIENT_REDIRECT_URI: ${VERYS_CLIENT_REDIRECT_URI}
       VERYS_CLIENT_REGISTRATION_URI: ${VERYS_CLIENT_REGISTRATION_URI}
 volumes:
-  pgdata:
+  mongodata:

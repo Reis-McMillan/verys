@@ -1,25 +1,20 @@
-from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 from verys.models.consent import Consent
+from verys.models.identity import Identity
 from verys.models.oauth2_client import OAuthClient
 from verys.models.oauth2_session import OAuth2Session
-from verys.modules.client_auth import hash_client_secret
 from verys.modules.cookie import encrypt_cookie
+from tests.helpers import new_client
 
 
-def _create_test_client(session, client_name="Auth Test App", redirect_uri="https://authtest.example.com/callback", scopes=None):
+async def _create_test_client(client_name="Auth Test App", redirect_uri="https://authtest.example.com/callback", scopes=None):
     """Helper to create a test OAuth2 client directly in the DB."""
-    oa_client = OAuthClient(
-        client_name=client_name,
-        redirect_uris=[redirect_uri],
+    return await new_client(
+        client_name,
+        [redirect_uri],
         allowed_scopes=scopes or ["openid", "email", "profile"],
-        client_secret_hash=hash_client_secret("test-secret"),
     )
-    session.add(oa_client)
-    session.commit()
-    session.refresh(oa_client)
-    return oa_client
 
 
 def test_authorize_invalid_client_id(client):
@@ -37,13 +32,13 @@ def test_authorize_invalid_client_id(client):
     assert 'Invalid client_id' in res.json()['error']
 
 
-def test_authorize_invalid_redirect_uri(session, client):
-    oa = _create_test_client(session, "Redirect Test")
+async def test_authorize_invalid_redirect_uri(db, client):
+    oa = await _create_test_client("Redirect Test")
     res = client.get(
         '/authorize',
         params={
             'response_type': 'code',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://evil.example.com/callback',
             'scope': 'openid',
         },
@@ -53,13 +48,13 @@ def test_authorize_invalid_redirect_uri(session, client):
     assert 'Invalid redirect_uri' in res.json()['error']
 
 
-def test_authorize_unsupported_response_type(session, client):
-    oa = _create_test_client(session, "Response Type Test")
+async def test_authorize_unsupported_response_type(db, client):
+    oa = await _create_test_client("Response Type Test")
     res = client.get(
         '/authorize',
         params={
             'response_type': 'token',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://authtest.example.com/callback',
             'scope': 'openid',
         },
@@ -71,13 +66,13 @@ def test_authorize_unsupported_response_type(session, client):
     assert parsed['error'][0] == 'unsupported_response_type'
 
 
-def test_authorize_missing_openid_scope(session, client):
-    oa = _create_test_client(session, "Scope Test")
+async def test_authorize_missing_openid_scope(db, client):
+    oa = await _create_test_client("Scope Test")
     res = client.get(
         '/authorize',
         params={
             'response_type': 'code',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://authtest.example.com/callback',
             'scope': 'email',
         },
@@ -89,13 +84,13 @@ def test_authorize_missing_openid_scope(session, client):
     assert parsed['error'][0] == 'invalid_scope'
 
 
-def test_authorize_scope_not_allowed(session, client):
-    oa = _create_test_client(session, "Scope Limit Test", scopes=["openid"])
+async def test_authorize_scope_not_allowed(db, client):
+    oa = await _create_test_client("Scope Limit Test", scopes=["openid"])
     res = client.get(
         '/authorize',
         params={
             'response_type': 'code',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://authtest.example.com/callback',
             'scope': 'openid email',
         },
@@ -107,13 +102,13 @@ def test_authorize_scope_not_allowed(session, client):
     assert parsed['error'][0] == 'invalid_scope'
 
 
-def test_authorize_unauthenticated_shows_login(session, client):
-    oa = _create_test_client(session, "Login Test")
+async def test_authorize_unauthenticated_shows_login(db, client):
+    oa = await _create_test_client("Login Test")
     res = client.get(
         '/authorize',
         params={
             'response_type': 'code',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://authtest.example.com/callback',
             'scope': 'openid',
         },
@@ -125,8 +120,8 @@ def test_authorize_unauthenticated_shows_login(session, client):
     assert 'Login Test' in res.text
 
 
-def test_authorize_authenticated_shows_consent(session, client):
-    oa = _create_test_client(session, "Consent Test")
+async def test_authorize_authenticated_shows_consent(db, client):
+    oa = await _create_test_client("Consent Test")
 
     # Set auth cookies
     token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
@@ -137,7 +132,7 @@ def test_authorize_authenticated_shows_consent(session, client):
         '/authorize',
         params={
             'response_type': 'code',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://authtest.example.com/callback',
             'scope': 'openid email',
         },
@@ -151,11 +146,16 @@ def test_authorize_authenticated_shows_consent(session, client):
     client.cookies.clear()
 
 
-def test_authorize_with_existing_consent_redirects(session, client):
-    oa = _create_test_client(session, "Pre-consented Test")
+async def test_authorize_with_existing_consent_redirects(db, client):
+    oa = await _create_test_client("Pre-consented Test")
 
     # Pre-grant consent
-    Consent.grant(session, "admin@mcmlln.dev", oa.client_id, ["openid"])
+    admin = await Identity.get(email='admin@mcmlln.dev')
+    await Consent.upsert({
+        'identity_id': admin['id'],
+        'client_id': oa['client_id'],
+        'scopes': ['openid'],
+    })
 
     # Set auth cookies
     token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
@@ -166,7 +166,7 @@ def test_authorize_with_existing_consent_redirects(session, client):
         '/authorize',
         params={
             'response_type': 'code',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://authtest.example.com/callback',
             'scope': 'openid',
             'state': 'mystate123',
@@ -182,8 +182,8 @@ def test_authorize_with_existing_consent_redirects(session, client):
     client.cookies.clear()
 
 
-def test_authorize_consent_approve(session, client):
-    oa = _create_test_client(session, "Approve Consent Test")
+async def test_authorize_consent_approve(db, client):
+    oa = await _create_test_client("Approve Consent Test")
 
     # Set auth cookies
     token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
@@ -192,22 +192,19 @@ def test_authorize_consent_approve(session, client):
 
     # Create an oauth2 session with CSRF token
     csrf = 'test-csrf-approve'
-    oauth2_sess = OAuth2Session(
-        client_id=oa.client_id,
-        redirect_uri='https://authtest.example.com/callback',
-        response_type='code',
-        scope='openid email',
-        state='consent-state',
-        csrf_token=csrf,
-    )
-    session.add(oauth2_sess)
-    session.commit()
-    session.refresh(oauth2_sess)
+    oauth2_sess = await OAuth2Session.upsert({
+        'client_id': oa['client_id'],
+        'redirect_uri': 'https://authtest.example.com/callback',
+        'response_type': 'code',
+        'scope': 'openid email',
+        'state': 'consent-state',
+        'csrf_token': csrf,
+    })
 
     res = client.post(
         '/authorize/consent',
         data={
-            'oauth2_session_id': oauth2_sess.session_id,
+            'oauth2_session_id': oauth2_sess['session_id'],
             'consent_action': 'approve',
             'csrf_token': csrf,
         },
@@ -219,33 +216,36 @@ def test_authorize_consent_approve(session, client):
     assert 'code' in parsed
     assert parsed['state'][0] == 'consent-state'
 
+    # Consent is recorded against the identity id and the session is gone
+    admin = await Identity.get(email='admin@mcmlln.dev')
+    consent = await Consent.get(identity_id=admin['id'], client_id=oa['client_id'])
+    assert consent['scopes'] == ['openid', 'email']
+    assert await OAuth2Session.get(session_id=oauth2_sess['session_id']) is None
+
     client.cookies.clear()
 
 
-def test_authorize_consent_deny(session, client):
-    oa = _create_test_client(session, "Deny Consent Test")
+async def test_authorize_consent_deny(db, client):
+    oa = await _create_test_client("Deny Consent Test")
 
     token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
     client.cookies.set('token', token)
     client.cookies.set('token_iv', iv)
 
     csrf = 'test-csrf-deny'
-    oauth2_sess = OAuth2Session(
-        client_id=oa.client_id,
-        redirect_uri='https://authtest.example.com/callback',
-        response_type='code',
-        scope='openid',
-        state='deny-state',
-        csrf_token=csrf,
-    )
-    session.add(oauth2_sess)
-    session.commit()
-    session.refresh(oauth2_sess)
+    oauth2_sess = await OAuth2Session.upsert({
+        'client_id': oa['client_id'],
+        'redirect_uri': 'https://authtest.example.com/callback',
+        'response_type': 'code',
+        'scope': 'openid',
+        'state': 'deny-state',
+        'csrf_token': csrf,
+    })
 
     res = client.post(
         '/authorize/consent',
         data={
-            'oauth2_session_id': oauth2_sess.session_id,
+            'oauth2_session_id': oauth2_sess['session_id'],
             'consent_action': 'deny',
             'csrf_token': csrf,
         },
@@ -259,7 +259,7 @@ def test_authorize_consent_deny(session, client):
     client.cookies.clear()
 
 
-def test_authorize_consent_expired_session(session, client):
+def test_authorize_consent_expired_session(client):
     token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
     client.cookies.set('token', token)
     client.cookies.set('token_iv', iv)
@@ -278,25 +278,22 @@ def test_authorize_consent_expired_session(session, client):
     client.cookies.clear()
 
 
-def test_authorize_consent_unauthenticated(session, client):
-    oa = _create_test_client(session, "Unauth Consent Test")
+async def test_authorize_consent_unauthenticated(db, client):
+    oa = await _create_test_client("Unauth Consent Test")
     csrf = 'test-csrf-unauth'
-    oauth2_sess = OAuth2Session(
-        client_id=oa.client_id,
-        redirect_uri='https://authtest.example.com/callback',
-        response_type='code',
-        scope='openid',
-        csrf_token=csrf,
-    )
-    session.add(oauth2_sess)
-    session.commit()
-    session.refresh(oauth2_sess)
+    oauth2_sess = await OAuth2Session.upsert({
+        'client_id': oa['client_id'],
+        'redirect_uri': 'https://authtest.example.com/callback',
+        'response_type': 'code',
+        'scope': 'openid',
+        'csrf_token': csrf,
+    })
 
     # No cookies set
     res = client.post(
         '/authorize/consent',
         data={
-            'oauth2_session_id': oauth2_sess.session_id,
+            'oauth2_session_id': oauth2_sess['session_id'],
             'consent_action': 'approve',
             'csrf_token': csrf,
         },
@@ -305,17 +302,14 @@ def test_authorize_consent_unauthenticated(session, client):
     assert res.status_code == 401
 
 
-def test_authorize_public_client_requires_pkce(session, client):
-    oa = OAuthClient(
-        client_name="PKCE Required Test",
-        redirect_uris=["https://authtest.example.com/callback"],
-        allowed_scopes=["openid"],
-        is_public=True,
-        token_endpoint_auth_method="none",
-    )
-    session.add(oa)
-    session.commit()
-    session.refresh(oa)
+async def test_authorize_public_client_requires_pkce(db, client):
+    oa = await OAuthClient.upsert({
+        'client_name': "PKCE Required Test",
+        'redirect_uris': ["https://authtest.example.com/callback"],
+        'allowed_scopes': ["openid"],
+        'is_public': True,
+        'token_endpoint_auth_method': "none",
+    })
 
     token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
     client.cookies.set('token', token)
@@ -325,7 +319,7 @@ def test_authorize_public_client_requires_pkce(session, client):
         '/authorize',
         params={
             'response_type': 'code',
-            'client_id': oa.client_id,
+            'client_id': oa['client_id'],
             'redirect_uri': 'https://authtest.example.com/callback',
             'scope': 'openid',
         },

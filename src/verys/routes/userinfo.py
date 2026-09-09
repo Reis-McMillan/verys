@@ -5,17 +5,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from verys.config import config
+from verys.middleware.authenticated import parse_subject
 from verys.models.identity import Identity
 from verys.modules.http import json_error
 from verys.modules.jwt import get_public_key_pem
-from verys.config import config
 
 logger = logging.getLogger("verys.userinfo")
 
 
 async def userinfo(request: Request):
-    session = request.state.session
-
     # Accept token from Authorization header or POST body (access_token field)
     token = None
     auth_header = request.headers.get("Authorization", "")
@@ -47,29 +46,29 @@ async def userinfo(request: Request):
         logger.warning("Subject missing while getting user info", exc_info=True)
         return json_error("Invalid token: missing subject", status_code=401)
 
-    try:
-        identity_id = int(sub)
-    except (TypeError, ValueError) as e:
-        logger.warning("Invalid subject data type while getting user info: %s", e)
+    identity_id = parse_subject(sub)
+    if identity_id is None:
+        logger.warning("Invalid subject data type while getting user info: %s", sub)
         return json_error("Invalid token: bad subject", status_code=401)
 
-    identity = Identity.get_by_id(session, identity_id)
+    identity = await Identity.get(id=identity_id, closed=False)
     if not identity:
         return json_error("Identity not found", status_code=401)
 
     token_scopes = set(decoded.get("scopes") or [])
 
-    claims = {"sub": str(identity.id)}
+    claims = {"sub": identity["id"]}
 
     if "email" in token_scopes:
-        claims["email"] = identity.email
-        claims["email_verified"] = identity.email_verified
+        claims["email"] = identity["email"]
+        claims["email_verified"] = identity["email_verified"]
 
     if "profile" in token_scopes:
-        claims["given_name"] = identity.first_name
-        claims["family_name"] = identity.last_name
-        claims["name"] = f"{identity.first_name} {identity.last_name}"
-        claims["origination"] = identity.origination.isoformat() if identity.origination else None
+        claims["given_name"] = identity["first_name"]
+        claims["family_name"] = identity["last_name"]
+        claims["name"] = f"{identity['first_name']} {identity['last_name']}"
+        origination = identity.get("origination")
+        claims["origination"] = origination.isoformat() if origination else None
 
     roles = decoded.get("roles")
     if roles:

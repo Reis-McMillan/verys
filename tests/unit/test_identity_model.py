@@ -1,140 +1,111 @@
+import uuid
 from datetime import datetime, timedelta, timezone
-from pydantic import ValidationError
+
 import pytest
-from sqlalchemy.exc import IntegrityError
+from pydantic import ValidationError
+from pymongo.errors import DuplicateKeyError
 
-from verys.models import Identity, Role, IdentityRole
 from verys.config import config
+from verys.models import Identity, Role
+from verys.modules.email import normalize_email
+from tests.helpers import ms, new_identity
 
-def test_transform_email():
-    res = Identity.transform_email(' Bob72@example.com ')
-    assert res == 'bob72@example.com'
+
+def test_normalize_email():
+    assert normalize_email(' Bob72@example.com ') == 'bob72@example.com'
 
 
-def test_new(session):
+async def test_new(db):
     auth_key = Identity.make_auth_key()
     expires = datetime.now(timezone.utc) + timedelta(seconds=config.AUTHENTICATION_TTL)
-    Identity.new(
-        session,
-        'Bob',
-        'Jones',
-        'Bob72@example.com',
-        auth_key,
-        expires,
-    )
+    await new_identity(' Bob72@example.com ', 'Bob', 'Jones', auth_key, expires)
 
-    res = Identity.get(session, 'bob72@example.com')
-    assert isinstance(res.id, int) == True
-    assert res.email == 'bob72@example.com'
-    assert res.first_name == 'Bob'
-    assert res.last_name == 'Jones'
-    assert res.auth_key == auth_key
-    assert res.expires == expires
-    assert res.origination <= datetime.now(timezone.utc)
-    assert res.roles == []
-    assert res.closed == False
+    res = await Identity.get(email='bob72@example.com')
+    assert uuid.UUID(res['id'])
+    assert res['email'] == 'bob72@example.com'
+    assert res['first_name'] == 'Bob'
+    assert res['last_name'] == 'Jones'
+    assert res['auth_key'] == auth_key
+    assert res['expires'] == ms(expires)
+    assert res['origination'] <= datetime.now(timezone.utc)
+    assert res['roles'] == []
+    assert res['closed'] is False
+    assert res['email_verified'] is False
 
 
-def test_duplicate(session):
-    with pytest.raises(IntegrityError):
-        Identity.new(
-            session,
-            'Bob',
-            'Jones',
-            'bob72@example.com',
-            Identity.make_auth_key(),
-            datetime.now(timezone.utc),
-        )
-    session.rollback()
+async def test_duplicate(db):
+    with pytest.raises(DuplicateKeyError):
+        await new_identity('bob72@example.com')
 
 
-def test_not_email(session):
+async def test_not_email(db):
     with pytest.raises(ValidationError):
-        Identity.new(
-            session,
-            'Bob',
-            'Jones',
-            'not an email',
-            Identity.make_auth_key(),
-            datetime.now(timezone.utc),
-        )
+        await new_identity('not an email')
 
 
-def test_get(session):
-    res = Identity.get(session, 'boB72@example.com')
-    assert isinstance(res.id, int) == True
-    assert res.email == 'bob72@example.com'
+async def test_get_normalized(db):
+    res = await Identity.get(email=normalize_email('boB72@example.com'))
+    assert res['email'] == 'bob72@example.com'
 
 
-def test_get_none(session):
-    res = Identity.get(session, 'nothere@example.com')
-    assert res is None
+async def test_get_none(db):
+    assert await Identity.get(email='nothere@example.com') is None
 
 
-def test_update_new_key(session):
-    # Get the original identity to compare expires
-    original = Identity.get(session, 'bob72@example.com')
-    original_expires = original.expires
+async def test_update_new_key(db):
+    identity = await Identity.get(email='bob72@example.com')
+    original_expires = identity['expires']
 
-    new_auth_key = Identity.make_auth_key()
-    res = Identity.update(
-        session,
-        'bob72@example.com',
-        new_key=new_auth_key)
-    assert res.auth_key == new_auth_key
-    # Expires should remain unchanged when only updating the key
-    assert res.expires == original_expires
+    identity['auth_key'] = Identity.make_auth_key()
+    res = await Identity.upsert(identity)
+    assert res['auth_key'] == identity['auth_key']
+    assert res['expires'] == original_expires
 
 
-def test_update_new_email(session):
-    new_email = 'newemail@example.com'
-    res = Identity.update(
-        session,
-        'bob72@example.com',
-        new_email=new_email)
-    assert res.email == new_email
+async def test_update_new_email(db):
+    identity = await Identity.get(email='bob72@example.com')
+    identity['email'] = 'newemail@example.com'
+    res = await Identity.upsert(identity)
+    assert res['email'] == 'newemail@example.com'
+    assert res['id'] == identity['id']
+    assert await Identity.get(email='bob72@example.com') is None
 
 
-def test_update_new_expires(session):
-    new_expires = datetime.now(timezone.utc) + timedelta(seconds=1000)
-    res = Identity.update(
-        session,
-        'newemail@example.com',
-        new_expires=new_expires)
-    assert res.expires == new_expires
+async def test_update_new_expires(db):
+    identity = await Identity.get(email='newemail@example.com')
+    identity['expires'] = datetime.now(timezone.utc) + timedelta(seconds=1000)
+    res = await Identity.upsert(identity)
+    assert res['expires'] == ms(identity['expires'])
 
 
-def test_assign_role(session):
-    identity = Identity.get(session, 'newemail@example.com')
-    role = Role.get(session, 'admin')
-    IdentityRole.add_identity_role(session, identity.id, role.id)
+async def test_assign_role(db):
+    identity = await Identity.get(email='newemail@example.com')
+    role = await Role.get(name='admin')
+    identity['roles'] = [role]
+    await Identity.upsert(identity)
 
-    session.refresh(identity)
-    assert [r.name for r in identity.roles] == ['admin']
-
-
-def test_update_all(session):
-    new_email = 'bob73@example.com'
-    new_auth_key = Identity.make_auth_key()
-    new_expires = datetime.now(timezone.utc) + timedelta(seconds=1000)
-    res = Identity.update(
-        session,
-        'newemail@example.com',
-        new_email=new_email,
-        new_key=new_auth_key,
-        new_expires=new_expires
-    )
-    assert res.email == new_email
-    assert res.auth_key == new_auth_key
-    assert res.expires == new_expires
+    identity = await Identity.get(email='newemail@example.com')
+    assert [r['name'] for r in identity['roles']] == ['admin']
 
 
-def test_close(session):
-    res = Identity.close(session, 'bob73@example.com')
-    assert res.closed == True
+async def test_close(db):
+    identity = await Identity.get(email='newemail@example.com')
+    identity['closed'] = True
+    res = await Identity.upsert(identity)
+    assert res['closed'] is True
+    assert await Identity.get(email='newemail@example.com', closed=False) is None
 
 
-def test_all(session):
-    res = Identity.all(session)
+async def test_all(db):
+    res = await Identity.all()
     assert len(res) == 3
-    assert res[0].email == 'admin@mcmlln.dev'
+    assert res[0]['email'] == 'admin@mcmlln.dev'
+
+
+async def test_history_logged(db):
+    identity = await Identity.get(email='newemail@example.com')
+    raw = await Identity.collection().find_one({'id': identity['id']})
+    emails = [entry['email'] for entry in raw['log']]
+    assert emails[0] == 'bob72@example.com'
+    assert emails[-1] == 'newemail@example.com'
+    assert raw['log'][-1]['closed'] is True
