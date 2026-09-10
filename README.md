@@ -66,7 +66,11 @@ Key environment variables expected in production:
 | `VERYS_CLIENT_ID` | OAuth2 client ID seeded at startup |
 | `VERYS_CLIENT_REDIRECT_URI` | Where the Verys public client redirects after auth |
 | `VERYS_CLIENT_REGISTRATION_URI` | External registration page URL (optional) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credentials for the seeded Google provider (optional; provider is skipped without them) |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Credentials and tenant (default `common`) for the seeded Microsoft provider (optional) |
 | `OPENOBSERVE_ENDPOINT` / `OPENOBSERVE_USER` / `OPENOBSERVE_TOKEN` | Log shipping (optional) |
+
+Startup seeding lives in [src/verys/seed.py](src/verys/seed.py): default roles, the OIDC scopes, the Verys public client, and the external providers listed in `SEED_PROVIDERS` in the config (Google and Microsoft) together with the `google` / `microsoft` scopes that route into them. Seeding only fills gaps; documents that already exist are left untouched, so admin edits survive restarts.
 
 ## Data model
 

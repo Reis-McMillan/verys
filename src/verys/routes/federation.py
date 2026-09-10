@@ -1,6 +1,15 @@
+"""Link an identity to an external provider and serve the resulting tokens.
+
+Linking is driven by the client: when a client holds a scope fulfilled by an
+external provider and Verys has no usable token for it (no token listed by
+``GET /federation/tokens``, or ``reauthorization_required`` from
+``GET /federation/{token_id}``), the client sends the user's browser to
+``GET /federation/initiate``. The OAuth2 authorize endpoint never starts
+federation on the client's behalf.
+"""
 import logging
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 from starlette.requests import Request
@@ -8,13 +17,10 @@ from starlette.responses import RedirectResponse
 from starlette.routing import Route
 
 from verys.config import config
-from verys.models.authorization_code import AuthorizationCode
 from verys.models.external_provider import ExternalProvider
 from verys.models.external_token import ExternalToken
 from verys.models.federation_session import FederationSession
-from verys.models.identity import Identity
 from verys.models.oauth2_client import OAuthClient
-from verys.models.oauth2_session import OAuth2Session
 from verys.models.scope import Scope
 from verys.modules.browser_auth import get_browser_identity
 from verys.modules.http import json_error, json_message, require_query
@@ -44,31 +50,42 @@ def _serialize_token(t: dict) -> dict:
     }
 
 
-def _resume_params(oauth2_sess: dict) -> dict:
-    params = {
-        "response_type": oauth2_sess["response_type"],
-        "client_id": oauth2_sess["client_id"],
-        "redirect_uri": oauth2_sess["redirect_uri"],
-        "scope": oauth2_sess["scope"],
-    }
-    for key in ("state", "nonce", "code_challenge", "code_challenge_method"):
-        if oauth2_sess.get(key):
-            params[key] = oauth2_sess[key]
-    return params
+def _with_params(url: str, params: dict) -> str:
+    """Append query params to ``url``, preserving any existing query string."""
+    parts = urlparse(url)
+    query = parse_qsl(parts.query, keep_blank_values=True) + list(params.items())
+    return urlunparse(parts._replace(query=urlencode(query)))
 
 
 async def initiate_federation(request: Request):
-    """Start upstream OAuth2 flow with an external provider."""
+    """Start the upstream OAuth2 flow with an external provider.
+
+    Requires the user's browser session. ``client_id`` and ``redirect_uri``
+    are optional but must be given together; the redirect URI must be one the
+    client has registered, and the browser is sent back there when the
+    upstream flow completes (with ``provider_id``, plus ``error`` and
+    ``error_description`` on failure). Without them the callback ends in a
+    JSON response.
+    """
     if err := require_query(request, "provider_id"):
         return err
     provider_id = request.query_params.get("provider_id")
-    oauth2_session_id = request.query_params.get("oauth2_session_id")
+    client_id = request.query_params.get("client_id")
     redirect_uri = request.query_params.get("redirect_uri")
 
     identity = await get_browser_identity(request)
     if not identity:
         return json_error("Not authenticated", status_code=401)
     identity_id = identity["id"]
+
+    if bool(client_id) != bool(redirect_uri):
+        return json_error("client_id and redirect_uri must be provided together")
+    if redirect_uri:
+        client = await OAuthClient.get(client_id=client_id)
+        if not client:
+            return json_error("Invalid client_id")
+        if redirect_uri not in client["redirect_uris"]:
+            return json_error("Invalid redirect_uri")
 
     provider = await ExternalProvider.get(provider_id=provider_id)
     if not provider or not provider["enabled"]:
@@ -81,7 +98,6 @@ async def initiate_federation(request: Request):
     fed_session = await FederationSession.upsert({
         "identity_id": identity_id,
         "provider_id": provider_id,
-        "oauth2_session_id": oauth2_session_id,
         "redirect_uri": redirect_uri,
     })
 
@@ -119,7 +135,6 @@ async def federation_callback(request: Request):
         return json_error("Provider mismatch")
 
     identity_id = fed_session["identity_id"]
-    oauth2_session_id = fed_session["oauth2_session_id"]
     client_redirect_uri = fed_session["redirect_uri"]
 
     # Handle error from upstream provider (user cancelled, no account, etc.)
@@ -128,60 +143,22 @@ async def federation_callback(request: Request):
             "Federation error from %s for identity %s: %s - %s",
             provider_id, identity_id, error, error_description,
         )
-
-        provider_scope = await Scope.get(provider_id=provider_id)
-        failed_scope_names = [provider_scope["name"]] if provider_scope else []
-
         await FederationSession.delete(session_id=state)
 
-        if oauth2_session_id:
-            oauth2_sess = await OAuth2Session.get(session_id=oauth2_session_id)
-            if oauth2_sess and not OAuth2Session.is_expired(oauth2_sess):
-                identity = await Identity.get(id=identity_id, closed=False)
-                client = await OAuthClient.get(client_id=oauth2_sess["client_id"])
-
-                if identity and client:
-                    full_scopes = oauth2_sess["scope"].split()
-                    granted_scopes = [s for s in full_scopes if s not in failed_scope_names]
-
-                    auth_time = identity["last_auth_time"] or datetime.now(timezone.utc)
-                    auth_code = await AuthorizationCode.upsert({
-                        "client_id": client["client_id"],
-                        "identity_email": identity["email"],
-                        "redirect_uri": oauth2_sess["redirect_uri"],
-                        "scopes": granted_scopes,
-                        "nonce": oauth2_sess["nonce"],
-                        "code_challenge": oauth2_sess["code_challenge"],
-                        "code_challenge_method": oauth2_sess["code_challenge_method"],
-                        "auth_time": auth_time,
-                        "expires_at": datetime.now(timezone.utc)
-                        + timedelta(seconds=config.AUTHORIZATION_CODE_TTL),
-                    })
-
-                    redirect_uri = oauth2_sess["redirect_uri"]
-                    state_param = oauth2_sess["state"]
-
-                    await OAuth2Session.delete(session_id=oauth2_session_id)
-
-                    params = {"code": auth_code["code"]}
-                    if state_param:
-                        params["state"] = state_param
-
-                    logger.info(
-                        "Federation failed for identity %s, issuing auth code with reduced scopes: %s",
-                        identity_id, granted_scopes,
-                    )
-                    return RedirectResponse(
-                        url=f"{redirect_uri}?{urlencode(params)}", status_code=302
-                    )
-
+        description = error_description or f"Upstream provider {provider_id} returned: {error}"
         if client_redirect_uri:
-            return RedirectResponse(url=client_redirect_uri, status_code=302)
+            return RedirectResponse(
+                url=_with_params(client_redirect_uri, {
+                    "error": "federation_failed",
+                    "error_description": description,
+                    "provider_id": provider_id,
+                }),
+                status_code=302,
+            )
 
         return json_error(
             "federation_failed",
-            error_description=error_description
-            or f"Upstream provider {provider_id} returned: {error}",
+            error_description=description,
             provider_id=provider_id,
         )
 
@@ -283,19 +260,11 @@ async def federation_callback(request: Request):
 
     await FederationSession.delete(session_id=state)
 
-    if oauth2_session_id:
-        oauth2_sess = await OAuth2Session.get(session_id=oauth2_session_id)
-        if oauth2_sess and not OAuth2Session.is_expired(oauth2_sess):
-            logger.info(
-                "Federation complete, resuming OAuth2 flow for identity %s",
-                identity_id,
-            )
-            return RedirectResponse(
-                url=f"/authorize?{urlencode(_resume_params(oauth2_sess))}", status_code=302
-            )
-
     if client_redirect_uri:
-        return RedirectResponse(url=client_redirect_uri, status_code=302)
+        return RedirectResponse(
+            url=_with_params(client_redirect_uri, {"provider_id": provider_id}),
+            status_code=302,
+        )
 
     return json_message("Federation complete", provider=provider_id)
 

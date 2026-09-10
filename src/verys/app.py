@@ -12,10 +12,9 @@ from verys.config import config
 from verys.database import close_db, ensure_indexes
 from verys.middleware.authenticated import BearerToken, on_auth_error
 from verys.middleware.logging import RequestLoggingMiddleware
-from verys.models import OAuthClient, Role, Scope
-from verys.models.role import DEFAULT_ROLES
-from verys.models.scope import OIDC_SCOPES
+from verys.models import Role
 from verys.modules.logging import setup_logging, shutdown_logging
+from verys.seed import seed_defaults
 from verys.routes import (
     clients,
     discovery,
@@ -33,35 +32,6 @@ from verys.routes import (
 )
 
 logger = logging.getLogger("verys")
-
-
-async def seed_defaults() -> None:
-    """Ensure the standard roles, OIDC scopes, and the Verys public client exist."""
-    for name in DEFAULT_ROLES:
-        if not await Role.get(name=name):
-            await Role.upsert({"name": name})
-
-    for name, description in OIDC_SCOPES:
-        if not await Scope.get(name=name):
-            await Scope.upsert({"name": name, "description": description})
-
-    verys_client = await OAuthClient.get(client_id=config.VERYS_CLIENT_ID)
-    if not verys_client:
-        await OAuthClient.upsert({
-            "client_id": config.VERYS_CLIENT_ID,
-            "client_name": "Verys Client",
-            "redirect_uris": [config.VERYS_CLIENT_REDIRECT_URI],
-            "allowed_scopes": ["openid", "email", "profile", "google", "microsoft"],
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
-            "is_public": True,
-        })
-        logger.info("Seeded Verys public client: %s", config.VERYS_CLIENT_ID)
-    elif verys_client["redirect_uris"] != [config.VERYS_CLIENT_REDIRECT_URI]:
-        verys_client["redirect_uris"] = [config.VERYS_CLIENT_REDIRECT_URI]
-        await OAuthClient.upsert(verys_client)
-        logger.info("Updated Verys public client redirect_uris: %s", config.VERYS_CLIENT_ID)
 
 
 @asynccontextmanager

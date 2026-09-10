@@ -14,7 +14,6 @@ from verys.config import config
 from verys.middleware.authenticated import parse_subject
 from verys.models.authorization_code import AuthorizationCode
 from verys.models.consent import Consent
-from verys.models.external_token import ExternalToken
 from verys.models.identity import Identity
 from verys.models.oauth2_client import OAuthClient
 from verys.models.oauth2_session import OAuth2Session
@@ -43,59 +42,6 @@ def _build_error_redirect(redirect_uri: str, error: str, description: str, state
     if state:
         params["state"] = state
     return RedirectResponse(url=f"{redirect_uri}?{urlencode(params)}", status_code=302)
-
-
-async def _federation_scopes(scope_names: list[str]) -> dict[str, list[str]]:
-    """Map provider_id -> requested scope names fulfilled by that provider."""
-    federation_scopes: dict[str, list[str]] = {}
-    for s in scope_names:
-        scope_record = await Scope.get(name=s)
-        if scope_record and scope_record["provider_id"]:
-            federation_scopes.setdefault(scope_record["provider_id"], []).append(s)
-    return federation_scopes
-
-
-async def _find_missing_federation_provider(
-    identity_id: str, federation_scopes: dict[str, list[str]]
-) -> str | None:
-    """Return the first federation provider missing a usable token, else None."""
-    for provider_id in federation_scopes:
-        tokens = await ExternalToken.all(identity_id=identity_id, provider_id=provider_id)
-        if not tokens or not any(t["refresh_token"] for t in tokens):
-            return provider_id
-    return None
-
-
-async def _redirect_to_federation(
-    provider_id: str,
-    scope_names: list[str],
-    client_id: str,
-    redirect_uri: str,
-    response_type: str,
-    scope: str,
-    state: str | None,
-    nonce: str | None,
-    code_challenge: str | None,
-    code_challenge_method: str | None,
-) -> RedirectResponse:
-    """Store OAuth2 session and redirect to federation initiate."""
-    oauth2_session = await OAuth2Session.upsert({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": response_type,
-        "scope": scope,
-        "state": state,
-        "nonce": nonce,
-        "code_challenge": code_challenge,
-        "code_challenge_method": code_challenge_method,
-    })
-
-    params = {
-        "provider_id": provider_id,
-        "scope_names": " ".join(scope_names),
-        "oauth2_session_id": oauth2_session["session_id"],
-    }
-    return RedirectResponse(url=f"/federation/initiate?{urlencode(params)}", status_code=302)
 
 
 async def authorize(request: Request):
@@ -163,17 +109,15 @@ async def authorize(request: Request):
                 f"Scope '{s}' is not allowed for this client", state
             )
 
-    # Validate scopes exist in the database and partition into OIDC vs federation
-    federation_scopes = {}  # provider_id -> [scope_name, ...]
+    # Validate scopes exist in the database. Scopes fulfilled by an external
+    # provider are consented to here like any other; linking the provider
+    # (via /federation/initiate) is the client's responsibility.
     for s in requested_scopes:
-        scope_record = await Scope.get(name=s)
-        if not scope_record:
+        if not await Scope.get(name=s):
             return _build_error_redirect(
                 redirect_uri, "invalid_scope",
                 f"Unknown scope '{s}'", state
             )
-        if scope_record["provider_id"]:
-            federation_scopes.setdefault(scope_record["provider_id"], []).append(s)
 
     # Validate PKCE
     if code_challenge and code_challenge_method != "S256":
@@ -250,18 +194,6 @@ async def authorize(request: Request):
 
     # prompt=consent forces the consent screen even if already granted
     if has_consent and "consent" not in prompt_values:
-        # Check if federation scopes need external tokens before issuing code
-        missing_provider = await _find_missing_federation_provider(
-            identity["id"], federation_scopes
-        )
-        if missing_provider:
-            return await _redirect_to_federation(
-                missing_provider, federation_scopes[missing_provider],
-                client_id, redirect_uri, response_type, scope, state, nonce,
-                code_challenge, code_challenge_method,
-            )
-
-        # Consent already granted and all external tokens present, issue code
         return await _issue_authorization_code(
             identity, client, redirect_uri,
             requested_scopes, state, nonce,
@@ -357,22 +289,6 @@ async def authorize_consent(request: Request):
         "client_id": client["client_id"],
         "scopes": requested_scopes,
     })
-
-    # Check if federation scopes need external tokens
-    federation_scopes = await _federation_scopes(requested_scopes)
-
-    missing_provider = await _find_missing_federation_provider(
-        identity["id"], federation_scopes
-    )
-    if missing_provider:
-        # Keep the session alive for the federation callback to resume
-        return await _redirect_to_federation(
-            missing_provider, federation_scopes[missing_provider],
-            oauth2_session["client_id"], redirect_uri,
-            oauth2_session["response_type"], oauth2_session["scope"], state,
-            oauth2_session["nonce"], oauth2_session["code_challenge"],
-            oauth2_session["code_challenge_method"],
-        )
 
     # Clean up session
     nonce = oauth2_session["nonce"]

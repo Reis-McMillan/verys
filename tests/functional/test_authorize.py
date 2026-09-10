@@ -1,11 +1,15 @@
 from urllib.parse import parse_qs, urlparse
 
 from verys.models.consent import Consent
+from verys.models.external_token import ExternalToken
 from verys.models.identity import Identity
 from verys.models.oauth2_client import OAuthClient
 from verys.models.oauth2_session import OAuth2Session
+from verys.models.scope import Scope
 from verys.modules.cookie import encrypt_cookie
 from tests.helpers import new_client
+
+REDIRECT_URI = 'https://authtest.example.com/callback'
 
 
 async def _create_test_client(client_name="Auth Test App", redirect_uri="https://authtest.example.com/callback", scopes=None):
@@ -300,6 +304,92 @@ async def test_authorize_consent_unauthenticated(db, client):
         follow_redirects=False,
     )
     assert res.status_code == 401
+
+
+async def _federation_scope():
+    """A scope fulfilled by an external provider; no provider record or
+    external token is needed for the authorize endpoint to accept it."""
+    return await Scope.upsert({
+        'name': 'calendar', 'description': 'Read your calendar', 'provider_id': 'idp',
+    })
+
+
+async def test_authorize_federation_scope_issues_code_without_external_token(db, client):
+    """Linking the provider is the client's job: authorize must not bounce to
+    /federation/initiate when no external token exists for a federation scope."""
+    await _federation_scope()
+    oa = await _create_test_client("Federation Scope Test", scopes=["openid", "calendar"])
+
+    admin = await Identity.get(email='admin@mcmlln.dev')
+    assert await ExternalToken.all(identity_id=admin['id'], provider_id='idp') == []
+    await Consent.upsert({
+        'identity_id': admin['id'],
+        'client_id': oa['client_id'],
+        'scopes': ['openid', 'calendar'],
+    })
+
+    token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
+    client.cookies.set('token', token)
+    client.cookies.set('token_iv', iv)
+
+    res = client.get(
+        '/authorize',
+        params={
+            'response_type': 'code',
+            'client_id': oa['client_id'],
+            'redirect_uri': REDIRECT_URI,
+            'scope': 'openid calendar',
+            'state': 'fed-state',
+            'prompt': 'none',
+        },
+        follow_redirects=False,
+    )
+    assert res.status_code == 302
+    location = res.headers['location']
+    assert location.startswith(REDIRECT_URI)
+    parsed = parse_qs(urlparse(location).query)
+    assert 'code' in parsed
+    assert parsed['state'][0] == 'fed-state'
+
+    client.cookies.clear()
+
+
+async def test_authorize_consent_approve_federation_scope_issues_code(db, client):
+    await _federation_scope()
+    oa = await _create_test_client("Federation Consent Test", scopes=["openid", "calendar"])
+
+    token, iv = encrypt_cookie('admin@mcmlln.dev', 'paris_people')
+    client.cookies.set('token', token)
+    client.cookies.set('token_iv', iv)
+
+    csrf = 'test-csrf-federation'
+    oauth2_sess = await OAuth2Session.upsert({
+        'client_id': oa['client_id'],
+        'redirect_uri': REDIRECT_URI,
+        'response_type': 'code',
+        'scope': 'openid calendar',
+        'state': 'fed-consent-state',
+        'csrf_token': csrf,
+    })
+
+    res = client.post(
+        '/authorize/consent',
+        data={
+            'oauth2_session_id': oauth2_sess['session_id'],
+            'consent_action': 'approve',
+            'csrf_token': csrf,
+        },
+        follow_redirects=False,
+    )
+    assert res.status_code == 302
+    location = res.headers['location']
+    assert location.startswith(REDIRECT_URI)
+    parsed = parse_qs(urlparse(location).query)
+    assert 'code' in parsed
+    assert parsed['state'][0] == 'fed-consent-state'
+    assert await OAuth2Session.get(session_id=oauth2_sess['session_id']) is None
+
+    client.cookies.clear()
 
 
 async def test_authorize_public_client_requires_pkce(db, client):

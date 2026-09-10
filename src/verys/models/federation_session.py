@@ -14,7 +14,8 @@ class FederationSessionSchema(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     identity_id: UUID4
     provider_id: str
-    oauth2_session_id: str | None = None
+    # Registered client redirect URI to send the browser to after the
+    # upstream flow completes; validated in /federation/initiate.
     redirect_uri: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
 

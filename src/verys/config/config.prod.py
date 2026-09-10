@@ -30,3 +30,34 @@ _oo_user = os.environ.get('OPENOBSERVE_USER')
 _oo_token = os.environ.get('OPENOBSERVE_TOKEN')
 OPENOBSERVE_TOKEN = base64.b64encode(f"{_oo_user}:{_oo_token}".encode()).decode() if _oo_user and _oo_token else None
 ALLOWED_ORIGINS=['https://verys.mcmlln.dev', 'https://moneypenny.mcmlln.dev', 'http://localhost:5173']
+
+# External identity providers seeded at startup (fill-the-gap only; see
+# verys/seed.py). Entries without client_id/client_secret are skipped.
+MICROSOFT_TENANT = os.environ.get('MICROSOFT_TENANT', 'common')
+SEED_PROVIDERS = [
+    {
+        'provider_id': 'google',
+        'display_name': 'Google',
+        'client_id': os.environ.get('GOOGLE_CLIENT_ID'),
+        'client_secret': os.environ.get('GOOGLE_CLIENT_SECRET'),
+        'authorization_endpoint': 'https://accounts.google.com/o/oauth2/v2/auth',
+        'token_endpoint': 'https://oauth2.googleapis.com/token',
+        'jwks_uri': 'https://www.googleapis.com/oauth2/v3/certs',
+        'userinfo_endpoint': 'https://openidconnect.googleapis.com/v1/userinfo',
+        'scopes': ['openid', 'email', 'profile'],
+        'scope': {'name': 'google', 'description': 'Link your Google account'},
+    },
+    {
+        'provider_id': 'microsoft',
+        'display_name': 'Microsoft',
+        'client_id': os.environ.get('MICROSOFT_CLIENT_ID'),
+        'client_secret': os.environ.get('MICROSOFT_CLIENT_SECRET'),
+        'authorization_endpoint': f'https://login.microsoftonline.com/{MICROSOFT_TENANT}/oauth2/v2.0/authorize',
+        'token_endpoint': f'https://login.microsoftonline.com/{MICROSOFT_TENANT}/oauth2/v2.0/token',
+        'jwks_uri': f'https://login.microsoftonline.com/{MICROSOFT_TENANT}/discovery/v2.0/keys',
+        'userinfo_endpoint': 'https://graph.microsoft.com/oidc/userinfo',
+        # offline_access is required for Microsoft to issue a refresh token.
+        'scopes': ['openid', 'email', 'profile', 'offline_access'],
+        'scope': {'name': 'microsoft', 'description': 'Link your Microsoft account'},
+    },
+]

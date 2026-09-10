@@ -31,3 +31,4 @@ _oo_user = os.environ.get('OPENOBSERVE_USER')
 _oo_token = os.environ.get('OPENOBSERVE_TOKEN')
 OPENOBSERVE_TOKEN = base64.b64encode(f"{_oo_user}:{_oo_token}".encode()).decode() if _oo_user and _oo_token else None
 ALLOWED_ORIGINS=['*']
+SEED_PROVIDERS = []  # tests seed providers explicitly
